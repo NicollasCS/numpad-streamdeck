@@ -1,0 +1,61 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Inno Setup
+installer/NumpadStreamDeck_Setup.exe
+*.tmp
+
+# Presets e configurações do usuário (dados sensíveis)
+# Não committar dados gerados em runtime
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*~
+.temp/
+temp/
