@@ -202,6 +202,21 @@ class NumpadStreamDeckApp:
         self.tab_presets = ttk.Frame(self.notebook, padding=18)
         self.notebook.add(self.tab_presets, text="Presets")
 
+        # Keyboard selector
+        keyboard_frame = ttk.LabelFrame(self.tab_presets, text="Select Keyboard", padding=10)
+        keyboard_frame.pack(fill="x", pady=(0, 12))
+        
+        self.keyboard_device_combo_presets = ttk.Combobox(keyboard_frame, textvariable=self.keyboard_device_var, state="readonly", width=40)
+        self.keyboard_device_combo_presets.pack(fill="x")
+        
+        # Presets selector
+        presets_frame = ttk.LabelFrame(self.tab_presets, text="Presets", padding=10)
+        presets_frame.pack(fill="x", pady=(0, 12))
+        
+        self.preset_combo = ttk.Combobox(presets_frame, textvariable=self.preset_var, state="readonly", width=40)
+        self.preset_combo.pack(fill="x")
+        self.preset_combo.bind("<<ComboboxSelected>>", lambda event: self.switch_preset(self.preset_var.get()))
+
         # Preset controls - simplified
         controls = ttk.Frame(self.tab_presets)
         controls.pack(fill="x", pady=(0, 16))
@@ -315,8 +330,8 @@ class NumpadStreamDeckApp:
         about_frame.pack(fill="x", pady=(0, 0))
 
         ttk.Label(about_frame, text="Numpad Stream Deck", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(about_frame, text="Version 1.0.0", foreground="#6b7280").pack(anchor="w")
-        ttk.Label(about_frame, text="A virtual numeric keypad for custom keyboard shortcuts.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+        ttk.Label(about_frame, text="Version v2", foreground="#6b7280").pack(anchor="w")
+        ttk.Label(about_frame, text="A lightweight custom keyboard shortcuts application.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
 
     def get_key_label(self, key_id):
         label_map = {
@@ -377,13 +392,17 @@ class NumpadStreamDeckApp:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
 
     def refresh_preset_selector(self):
-        # Simplified - no preset selector anymore
         items = list(self.presets.keys())
+        if hasattr(self, "preset_combo"):
+            self.preset_combo["values"] = items
         if self.current_preset_name not in items:
             if items:
                 self.current_preset_name = items[0]
             else:
                 self.current_preset_name = "Default"
+        self.preset_var.set(self.current_preset_name)
+        if hasattr(self, "preset_combo"):
+            self.preset_combo.set(self.current_preset_name)
 
     def switch_preset(self, preset_name):
         if not preset_name or preset_name not in self.presets:
@@ -531,8 +550,11 @@ class NumpadStreamDeckApp:
             combo.pack(side="left", padx=(20, 8), fill="x", expand=True)
             combo.bind("<<ComboboxSelected>>", lambda event, k=key_id, var=function_var: self.apply_action_choice(k, var.get()))
 
+            delete_button = ttk.Button(row, text="-", width=2, command=lambda k=key_id: self.delete_key_action_direct(k))
+            delete_button.pack(side="right", padx=(0, 4))
+
             edit_button = ttk.Button(row, text="Editar", command=lambda k=key_id: self.edit_key_action(k))
-            edit_button.pack(side="right")
+            edit_button.pack(side="right", padx=(0, 4))
 
             if action_type == "none":
                 key_label.configure(foreground="#6b7280")
@@ -695,6 +717,15 @@ class NumpadStreamDeckApp:
             self._assignment_key_callback = None
         self._pending_key_assignment = False
 
+    def delete_key_action_direct(self, key_id):
+        """Delete a key assignment immediately"""
+        if messagebox.askyesno(APP_NAME, f"Delete '{self.get_key_label(key_id)}'?"):
+            preset = self.get_current_preset()
+            if key_id in preset["keys"]:
+                del preset["keys"][key_id]
+                self.save_presets()
+                self.update_key_buttons()
+
     def translate_type(self, action_type):
         for label, code in ACTION_MAP.items():
             if code == action_type:
@@ -721,8 +752,22 @@ class NumpadStreamDeckApp:
         value_entry = ttk.Entry(dialog, textvariable=value_var, width=40)
         value_entry.pack(fill="x", padx=14)
 
+        def browse_file():
+            if mode_var.get() == "Launch Application":
+                from tkinter import filedialog
+                filename = filedialog.askopenfilename(
+                    title="Select Application",
+                    filetypes=[("Executables", "*.exe"), ("All Files", "*.*")]
+                )
+                if filename:
+                    value_var.set(filename)
+
+        browse_frame = ttk.Frame(dialog)
+        browse_frame.pack(fill="x", padx=14, pady=(4, 8))
+        ttk.Button(browse_frame, text="Browse", command=browse_file).pack(side="left")
+
         help_label = ttk.Label(dialog, text="For shortcuts, use format: ctrl+shift+s", foreground="#9ca3af")
-        help_label.pack(anchor="w", padx=14, pady=(8, 10))
+        help_label.pack(anchor="w", padx=14, pady=(0, 10))
 
         def record_shortcut():
             self.record_shortcut(value_var)
@@ -1283,7 +1328,10 @@ class NumpadStreamDeckApp:
             if devices:
                 self.available_keyboard_devices = devices
                 labels = [self._device_label(device) for device in devices]
-                self.keyboard_device_combo["values"] = ["All keyboards"] + labels
+                values = ["All keyboards"] + labels
+                self.keyboard_device_combo["values"] = values
+                if hasattr(self, "keyboard_device_combo_presets"):
+                    self.keyboard_device_combo_presets["values"] = values
                 if not self.keyboard_device_id:
                     self.keyboard_device_var.set("All keyboards")
                     self.keyboard_device_id = ""
@@ -1299,6 +1347,8 @@ class NumpadStreamDeckApp:
         if not self.raw_input_enabled:
             self.available_keyboard_devices = []
             self.keyboard_device_combo["values"] = []
+            if hasattr(self, "keyboard_device_combo_presets"):
+                self.keyboard_device_combo_presets["values"] = []
             self.keyboard_device_var.set("")
             self.keyboard_device_id = ""
             return
@@ -1306,14 +1356,20 @@ class NumpadStreamDeckApp:
         devices = self._enum_raw_input_devices()
         if not devices:
             self.available_keyboard_devices = []
-            self.keyboard_device_combo["values"] = ["All keyboards"]
+            values = ["All keyboards"]
+            self.keyboard_device_combo["values"] = values
+            if hasattr(self, "keyboard_device_combo_presets"):
+                self.keyboard_device_combo_presets["values"] = values
             self.keyboard_device_var.set("All keyboards")
             self.keyboard_device_id = ""
             return
 
         self.available_keyboard_devices = devices
         labels = [self._device_label(device) for device in devices]
-        self.keyboard_device_combo["values"] = ["All keyboards"] + labels
+        values = ["All keyboards"] + labels
+        self.keyboard_device_combo["values"] = values
+        if hasattr(self, "keyboard_device_combo_presets"):
+            self.keyboard_device_combo_presets["values"] = values
 
         if not self.keyboard_device_id:
             self.keyboard_device_var.set("All keyboards")
