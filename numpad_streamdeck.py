@@ -206,7 +206,7 @@ class NumpadStreamDeckApp:
         controls = ttk.Frame(self.tab_presets)
         controls.pack(fill="x", pady=(0, 16))
 
-        ttk.Button(controls, text="+ Assign Key", command=self.assign_new_key).pack(side="left")
+        ttk.Button(controls, text="+", command=self.assign_new_key, width=3).pack(side="left")
 
         # Keyboard pad
         pad = ttk.Frame(self.tab_presets)
@@ -591,9 +591,59 @@ class NumpadStreamDeckApp:
         return normalized
 
     def assign_new_key(self):
+        dialog = Toplevel(self.root)
+        dialog.title("Assign Key")
+        dialog.geometry("380x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        detected_key_var = StringVar(value="")
+        function_var = StringVar(value="None")
+        
+        # Key detection section
+        ttk.Label(dialog, text="Press a key:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(14, 8))
+        key_label = ttk.Label(dialog, text="Waiting...", font=("Segoe UI", 11), foreground="#0b5ed7")
+        key_label.pack(anchor="w", padx=14, pady=(0, 12))
+        
+        # Function selection section
+        ttk.Label(dialog, text="Function:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(0, 4))
+        combo = ttk.Combobox(dialog, textvariable=function_var, values=["None"] + list(ACTION_MAP.keys())[1:], state="readonly")
+        combo.pack(fill="x", padx=14, pady=(0, 16))
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill="x", padx=14, pady=(0, 14))
+        
+        def save_action():
+            key_id = detected_key_var.get().strip()
+            if not key_id:
+                messagebox.showwarning(APP_NAME, "Please detect a key first.")
+                return
+            
+            preset = self.get_current_preset()
+            selected_label = function_var.get()
+            code = ACTION_MAP.get(selected_label, "none")
+            preset["keys"][key_id] = {"type": code, "value": ""}
+            self.save_presets()
+            self.cancel_key_assignment()
+            self.update_key_buttons()
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_action).pack(side="left", padx=(0, 4))
+        ttk.Button(button_frame, text="Cancel", command=lambda: [self.cancel_key_assignment(), dialog.destroy()]).pack(side="left")
+        
+        # Start listening for key press
         self._pending_key_assignment = True
-        self._assignment_key_callback = keyboard.on_press(self._handle_key_assignment)
-        messagebox.showinfo(APP_NAME, "Pressione a tecla física que você quer atribuir. Pressione Esc para cancelar.")
+        self._assignment_dialog = dialog
+        self._assignment_key_callback = keyboard.on_press(lambda event: self._handle_key_assignment_new(event, detected_key_var, key_label))
+        
+        # Handle dialog close
+        def on_dialog_close():
+            self.cancel_key_assignment()
+            dialog.destroy()
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
 
     def _handle_key_assignment(self, event):
         if not getattr(self, "_pending_key_assignment", False):
@@ -616,6 +666,28 @@ class NumpadStreamDeckApp:
         self.cancel_key_assignment()
         self.update_key_buttons()
         self.edit_key_action(key_id)
+
+    def _handle_key_assignment_new(self, event, detected_key_var, key_label):
+        """Handle key detection in the compact assign dialog"""
+        if not getattr(self, "_pending_key_assignment", False):
+            return
+        if getattr(event, "name", "").lower() in {"esc", "escape"}:
+            self.cancel_key_assignment()
+            if hasattr(self, "_assignment_dialog") and self._assignment_dialog.winfo_exists():
+                self._assignment_dialog.destroy()
+            return
+
+        key_id = self._normalize_assigned_key_id(
+            key_name=getattr(event, "name", None),
+            scan_code=getattr(event, "scan_code", None),
+            vk_code=getattr(event, "vk", None),
+        )
+        if not key_id:
+            return
+        
+        # Update the dialog with detected key
+        detected_key_var.set(key_id)
+        key_label.configure(text=f"Detected: {self.get_key_label(key_id)}", foreground="#16a34a")
 
     def cancel_key_assignment(self):
         if getattr(self, "_assignment_key_callback", None) is not None:
