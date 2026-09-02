@@ -27,45 +27,45 @@ KEY_LAYOUT = [
 ]
 
 ACTION_TYPES = [
-    "Nada",
-    "Fechar janela",
-    "Abrir site",
-    "Abrir programa/arquivo",
-    "Abrir pasta",
-    "Atalho de teclado",
+    "None",
+    "Close Window",
+    "Open Website",
+    "Launch Application",
+    "Open Folder",
+    "Keyboard Shortcut",
     "Play/Pause",
-    "Música anterior",
-    "Música próxima",
-    "Volume +",
-    "Volume -",
+    "Previous Track",
+    "Next Track",
+    "Volume Up",
+    "Volume Down",
     "Mute",
-    "Área de trabalho",
+    "Show Desktop",
     "Windows + Tab",
     "Alt + Tab",
-    "Digitar texto + Enter",
-    "Bloquear PC",
-    "Captura de tela",
+    "Type Text + Enter",
+    "Lock PC",
+    "Screenshot",
 ]
 
 ACTION_MAP = {
-    "Nada": "none",
-    "Fechar janela": "close_window",
-    "Abrir site": "open_site",
-    "Abrir programa/arquivo": "open_program",
-    "Abrir pasta": "open_folder",
-    "Atalho de teclado": "hotkey",
+    "None": "none",
+    "Close Window": "close_window",
+    "Open Website": "open_site",
+    "Launch Application": "open_program",
+    "Open Folder": "open_folder",
+    "Keyboard Shortcut": "hotkey",
     "Play/Pause": "play_pause",
-    "Música anterior": "prev_track",
-    "Música próxima": "next_track",
-    "Volume +": "volume_up",
-    "Volume -": "volume_down",
+    "Previous Track": "prev_track",
+    "Next Track": "next_track",
+    "Volume Up": "volume_up",
+    "Volume Down": "volume_down",
     "Mute": "mute",
-    "Área de trabalho": "desktop",
+    "Show Desktop": "desktop",
     "Windows + Tab": "windows_tab",
     "Alt + Tab": "alt_tab",
-    "Digitar texto + Enter": "write_text",
-    "Bloquear PC": "lock_pc",
-    "Captura de tela": "screenshot",
+    "Type Text + Enter": "write_text",
+    "Lock PC": "lock_pc",
+    "Screenshot": "screenshot",
 }
 
 DEFAULT_PRESET_NAMES = ["Default"]
@@ -134,7 +134,7 @@ class NumpadStreamDeckApp:
         self.key_buttons = {}
 
         self.header_var = StringVar(value="Numpad Stream Deck")
-        self.status_var = StringVar(value="Ativo")
+        self.status_var = StringVar(value="Enabled")
         self.preset_var = StringVar()
 
         ensure_appdata_dir()
@@ -174,10 +174,10 @@ class NumpadStreamDeckApp:
         self.preset_combo.pack(side="left", padx=(0, 12))
         self.preset_combo.bind("<<ComboboxSelected>>", lambda event: self.switch_preset(self.preset_var.get()))
 
-        ttk.Button(controls, text="➕ Novo", command=self.create_preset).pack(side="left", padx=4)
-        ttk.Button(controls, text="📋 Duplicar", command=self.duplicate_preset).pack(side="left", padx=4)
-        ttk.Button(controls, text="✏️ Renomear", command=self.rename_preset).pack(side="left", padx=4)
-        ttk.Button(controls, text="🗑️ Excluir", command=self.delete_preset).pack(side="left", padx=4)
+        ttk.Button(controls, text="Add", command=self.create_preset).pack(side="left", padx=4)
+        ttk.Button(controls, text="Duplicate", command=self.duplicate_preset).pack(side="left", padx=4)
+        ttk.Button(controls, text="Rename", command=self.rename_preset).pack(side="left", padx=4)
+        ttk.Button(controls, text="Delete", command=self.delete_preset).pack(side="left", padx=4)
 
         # Keyboard pad
         pad = ttk.Frame(self.tab_presets)
@@ -219,42 +219,42 @@ class NumpadStreamDeckApp:
             lb.grid(row=row, column=col, rowspan=row_span, columnspan=col_span, sticky="nsew", padx=6, pady=6)
             self.key_buttons[key_id] = lb
 
-        # Tab 2: Configurações
+        # Tab 2: Settings
         self.tab_settings = ttk.Frame(self.notebook, padding=18)
-        self.notebook.add(self.tab_settings, text="Configurações")
+        self.notebook.add(self.tab_settings, text="Settings")
         self.build_settings_tab()
 
         self.root.bind("<Escape>", self.hide_window)
 
     def build_settings_tab(self):
         # Status section
-        status_frame = ttk.LabelFrame(self.tab_settings, text="Status do aplicativo", padding=12)
+        status_frame = ttk.LabelFrame(self.tab_settings, text="Application Status", padding=12)
         status_frame.pack(fill="x", pady=(0, 16))
 
         status_inner = ttk.Frame(status_frame)
         status_inner.pack(fill="x")
-        ttk.Label(status_inner, text="Estado:", font=("Segoe UI", 10)).pack(side="left", padx=(0, 8))
+        ttk.Label(status_inner, text="State:", font=("Segoe UI", 10)).pack(side="left", padx=(0, 8))
         ttk.Label(status_inner, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), foreground="#16a34a").pack(side="left")
 
         toggle_frame = ttk.Frame(status_frame)
         toggle_frame.pack(fill="x", pady=(12, 0))
-        ttk.Button(toggle_frame, text="Alternar Ativo/Inativo (CTRL+ALT+F12)", command=self.toggle_enabled).pack(side="left")
+        ttk.Button(toggle_frame, text="Toggle Enabled/Disabled (CTRL+ALT+F12)", command=self.toggle_enabled).pack(side="left")
 
         # Startup section
-        startup_frame = ttk.LabelFrame(self.tab_settings, text="Inicialização", padding=12)
+        startup_frame = ttk.LabelFrame(self.tab_settings, text="Startup", padding=12)
         startup_frame.pack(fill="x", pady=(0, 16))
 
         self.startup_var = BooleanVar(value=False)
-        ttk.Checkbutton(startup_frame, text="Iniciar com o Windows", variable=self.startup_var).pack(anchor="w", pady=4)
-        ttk.Label(startup_frame, text="O aplicativo será adicionado à lista de inicialização do Windows.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w")
+        ttk.Checkbutton(startup_frame, text="Start with Windows", variable=self.startup_var).pack(anchor="w", pady=4)
+        ttk.Label(startup_frame, text="The application will be added to Windows startup list.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w")
 
         # Hotkeys section
-        hotkeys_frame = ttk.LabelFrame(self.tab_settings, text="Atalhos de teclado", padding=12)
+        hotkeys_frame = ttk.LabelFrame(self.tab_settings, text="Keyboard Shortcuts", padding=12)
         hotkeys_frame.pack(fill="x", pady=(0, 16))
 
         hotkey_rows = [
-            ("Ativar/Desativar numpad:", "CTRL + ALT + F12"),
-            ("Trocar para preset Default:", "CTRL + ALT + 1"),
+            ("Toggle numpad:", "CTRL + ALT + F12"),
+            ("Switch to Default preset:", "CTRL + ALT + 1"),
         ]
 
         for label, key in hotkey_rows:
@@ -264,12 +264,12 @@ class NumpadStreamDeckApp:
             ttk.Label(row, text=key, font=("Segoe UI", 10, "bold"), foreground="#0b5ed7").pack(side="left")
 
         # About section
-        about_frame = ttk.LabelFrame(self.tab_settings, text="Sobre", padding=12)
+        about_frame = ttk.LabelFrame(self.tab_settings, text="About", padding=12)
         about_frame.pack(fill="x", pady=(0, 0))
 
         ttk.Label(about_frame, text="Numpad Stream Deck", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(about_frame, text="Versão 1.0.0", foreground="#6b7280").pack(anchor="w")
-        ttk.Label(about_frame, text="Um teclado numérico virtual para atalhos personalizados.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+        ttk.Label(about_frame, text="Version 1.0.0", foreground="#6b7280").pack(anchor="w")
+        ttk.Label(about_frame, text="A virtual numeric keypad for custom keyboard shortcuts.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
 
     def get_key_label(self, key_id):
         label_map = {
@@ -348,11 +348,11 @@ class NumpadStreamDeckApp:
         self.update_key_buttons()
 
     def create_preset(self):
-        name = self.prompt_name("Novo preset", "Digite o nome do preset:")
+        name = self.prompt_name("New Preset", "Enter preset name:")
         if not name:
             return
         if name in self.presets:
-            messagebox.showerror(APP_NAME, "Este preset já existe.")
+            messagebox.showerror(APP_NAME, "This preset already exists.")
             return
         self.presets[name] = default_empty_preset()
         self.current_preset_name = name
@@ -362,11 +362,11 @@ class NumpadStreamDeckApp:
 
     def duplicate_preset(self):
         source = self.current_preset_name
-        duplicated = self.prompt_name("Duplicar preset", f"Nome da cópia de '{source}':")
+        duplicated = self.prompt_name("Duplicate Preset", f"Name for copy of '{source}':")
         if not duplicated:
             return
         if duplicated in self.presets:
-            messagebox.showerror(APP_NAME, "Já existe um preset com esse nome.")
+            messagebox.showerror(APP_NAME, "A preset with this name already exists.")
             return
         self.presets[duplicated] = json.loads(json.dumps(self.presets[source]))
         self.current_preset_name = duplicated
@@ -376,11 +376,11 @@ class NumpadStreamDeckApp:
 
     def rename_preset(self):
         current = self.current_preset_name
-        new_name = self.prompt_name("Renomear preset", "Novo nome:", default=current)
+        new_name = self.prompt_name("Rename Preset", "New name:", default=current)
         if not new_name or not new_name.strip():
             return
         if new_name in self.presets and new_name != current:
-            messagebox.showerror(APP_NAME, "Este nome já existe.")
+            messagebox.showerror(APP_NAME, "This name already exists.")
             return
         if new_name == current:
             return
@@ -393,10 +393,10 @@ class NumpadStreamDeckApp:
 
     def delete_preset(self):
         if len(self.presets) <= 1:
-            messagebox.showwarning(APP_NAME, "É preciso manter pelo menos um preset.")
+            messagebox.showwarning(APP_NAME, "You must keep at least one preset.")
             return
         current = self.current_preset_name
-        if messagebox.askyesno(APP_NAME, f"Excluir o preset '{current}'?"):
+        if messagebox.askyesno(APP_NAME, f"Delete preset '{current}'?"):
             del self.presets[current]
             self.current_preset_name = next(iter(self.presets))
             self.save_presets()
@@ -408,7 +408,7 @@ class NumpadStreamDeckApp:
         dialog.title(title)
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("320x120")
+        dialog.geometry("380x120")
         ttk.Label(dialog, text=prompt).pack(anchor="w", padx=14, pady=(14, 6))
         value = StringVar(value=default)
         entry = ttk.Entry(dialog, textvariable=value, width=28)
@@ -420,7 +420,7 @@ class NumpadStreamDeckApp:
             dialog.result = result
             dialog.destroy()
 
-        ttk.Button(dialog, text="OK", command=accept).pack()
+        ttk.Button(dialog, text="OK", command=accept).pack(pady=8)
         dialog.result = ""
         dialog.wait_window(dialog)
         return dialog.result
@@ -443,7 +443,10 @@ class NumpadStreamDeckApp:
         action_type = action.get("type", "none")
         if action_type == "none":
             return label
-        return f"{label}\n{self.translate_type(action_type)}"
+        action_label = self.translate_type(action_type)
+        if len(action_label) > 12:
+            action_label = action_label[:10] + "..."
+        return f"{label}\n{action_label}"
 
     def translate_type(self, action_type):
         for label, code in ACTION_MAP.items():
@@ -455,7 +458,7 @@ class NumpadStreamDeckApp:
         preset = self.get_current_preset()
         action = preset["keys"].get(key_id, {"type": "none", "value": ""})
         dialog = Toplevel(self.root)
-        dialog.title(f"Editar ação - {self.get_key_label(key_id)}")
+        dialog.title(f"Edit Action - {self.get_key_label(key_id)}")
         dialog.geometry("420x280")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -463,15 +466,15 @@ class NumpadStreamDeckApp:
         mode_var = StringVar(value=self.translate_type(action.get("type", "none")))
         value_var = StringVar(value=safe_text(action.get("value", "")))
 
-        ttk.Label(dialog, text="Ação:").pack(anchor="w", padx=14, pady=(14, 4))
+        ttk.Label(dialog, text="Action:").pack(anchor="w", padx=14, pady=(14, 4))
         combo = ttk.Combobox(dialog, textvariable=mode_var, values=ACTION_TYPES, state="readonly", width=36)
         combo.pack(fill="x", padx=14)
 
-        ttk.Label(dialog, text="Valor / caminho / texto:").pack(anchor="w", padx=14, pady=(12, 4))
+        ttk.Label(dialog, text="Value / Path / Text:").pack(anchor="w", padx=14, pady=(12, 4))
         value_entry = ttk.Entry(dialog, textvariable=value_var, width=40)
         value_entry.pack(fill="x", padx=14)
 
-        help_label = ttk.Label(dialog, text="Para atalhos, use o formato: ctrl+shift+s", foreground="#9ca3af")
+        help_label = ttk.Label(dialog, text="For shortcuts, use format: ctrl+shift+s", foreground="#9ca3af")
         help_label.pack(anchor="w", padx=14, pady=(8, 10))
 
         def record_shortcut():
@@ -479,7 +482,7 @@ class NumpadStreamDeckApp:
 
         btn_row = ttk.Frame(dialog)
         btn_row.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Button(btn_row, text="Gravar atalho", command=record_shortcut).pack(side="left")
+        ttk.Button(btn_row, text="Record Shortcut", command=record_shortcut).pack(side="left")
 
         def save_action():
             selected_label = mode_var.get()
@@ -489,12 +492,12 @@ class NumpadStreamDeckApp:
             self.update_key_buttons()
             dialog.destroy()
 
-        ttk.Button(dialog, text="Salvar", command=save_action).pack(pady=8)
+        ttk.Button(dialog, text="Save", command=save_action).pack(pady=8)
 
     def record_shortcut(self, value_var):
         self.recording_target = value_var
         self.recording_callback = keyboard.on_press(self._handle_hotkey_record)
-        messagebox.showinfo(APP_NAME, "Pressione a combinação desejada.")
+        messagebox.showinfo(APP_NAME, "Press the desired key combination.")
 
     def _handle_hotkey_record(self, event):
         if self.recording_target is None:
@@ -520,7 +523,7 @@ class NumpadStreamDeckApp:
         self.recording_target = None
 
     def update_status_display(self):
-        text = "Ativo" if self.enabled else "Inativo"
+        text = "Enabled" if self.enabled else "Disabled"
         self.status_var.set(text)
         self.status_label.configure(foreground="#16a34a" if self.enabled else "#d97706")
 
@@ -541,10 +544,10 @@ class NumpadStreamDeckApp:
     def create_tray_icon(self):
         image = self.make_tray_image()
         menu = (
-            pystray.MenuItem("Abrir", self.show_window),
-            pystray.MenuItem("Trocar preset", self.rotate_preset),
+            pystray.MenuItem("Open", self.show_window),
+            pystray.MenuItem("Switch Preset", self.rotate_preset),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Sair", self.exit_app),
+            pystray.MenuItem("Exit", self.exit_app),
         )
         self.tray_icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
