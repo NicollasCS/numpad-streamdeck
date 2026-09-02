@@ -33,6 +33,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "dist\NumpadStreamDeck.exe"; DestDir: "{app}"
 Source: "icon.ico"; DestDir: "{app}"
+Source: "VC_redist.x64.exe"; DestDir: "{tmp}"
 
 [Icons]
 Name: "{userdesktop}\Numpad Stream Deck"; Filename: "{app}\NumpadStreamDeck.exe"; Tasks: desktopicon
@@ -43,6 +44,7 @@ Name: "desktopicon"; Description: "Criar atalho na area de trabalho"; GroupDescr
 Name: "startup"; Description: "Iniciar com o Windows"; GroupDescription: "Opcoes adicionais:";
 
 [Run]
+Filename: "{tmp}\VC_redist.x64.exe"; Description: "Instalando Microsoft Visual C++ Redistributable"; Parameters: "/quiet /norestart"; Flags: waituntilterminated; Check: Is64BitInstallMode
 Filename: "{app}\NumpadStreamDeck.exe"; Description: "Executar Numpad Stream Deck"; Flags: nowait postinstall skipifsilent
 
 [Registry]
