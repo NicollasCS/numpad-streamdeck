@@ -1,42 +1,43 @@
+"""
+Numpad Stream Deck - Simple Keyboard Shortcut Manager
+Manage keyboard shortcuts with a clean, minimalist interface.
+"""
+
 import ctypes
 import json
 import os
-import platform
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, Toplevel, messagebox
+from tkinter import BooleanVar, StringVar, Tk, Toplevel, filedialog, messagebox, simpledialog
 from tkinter import ttk
 import tkinter as tk
 
 import keyboard
 import pystray
-from PIL import Image, ImageGrab
+from PIL import Image
 
-try:
-    from ctypes import wintypes
-    import ctypes
-except ImportError:  # pragma: no cover - only used on Windows
-    wintypes = None
-    ctypes = None
-
-try:
-    import win32api
-    import win32con
-    import win32gui
-except ImportError:  # pragma: no cover - only used on Windows
-    win32api = None
-    win32con = None
-    win32gui = None
-
+# Configuration
 APP_NAME = "Numpad Stream Deck"
 APPDATA_DIR = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "NumpadStreamDeck"
 PRESET_FILE = APPDATA_DIR / "numpad_presets.json"
+APP_VERSION = "v2"
+_instance_mutex = None
 
-KEY_LAYOUT = []
 
+def acquire_single_instance():
+    """Keep only one application process and tray icon running."""
+    global _instance_mutex
+    if os.name != "nt":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    _instance_mutex = kernel32.CreateMutexW(None, False, "Local\\NumpadStreamDeck")
+    return kernel32.GetLastError() != 183
+
+# Actions available
 ACTION_TYPES = [
     "None",
     "Close Window",
@@ -50,7 +51,6 @@ ACTION_TYPES = [
     "Volume Up",
     "Volume Down",
     "Mute",
-    "Show Desktop",
     "Windows + Tab",
     "Alt + Tab",
     "Type Text + Enter",
@@ -71,7 +71,6 @@ ACTION_MAP = {
     "Volume Up": "volume_up",
     "Volume Down": "volume_down",
     "Mute": "mute",
-    "Show Desktop": "desktop",
     "Windows + Tab": "windows_tab",
     "Alt + Tab": "alt_tab",
     "Type Text + Enter": "write_text",
@@ -79,1382 +78,947 @@ ACTION_MAP = {
     "Screenshot": "screenshot",
 }
 
-DEFAULT_PRESET_NAMES = ["Default"]
-
 
 def ensure_appdata_dir():
+    """Ensure AppData directory exists"""
     APPDATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def safe_text(value):
-    return str(value or "")
-
-
-def flatten_key_layout():
-    flattened = []
-    for row in KEY_LAYOUT:
-        for key in row:
-            if key not in flattened:
-                flattened.append(key)
-    return flattened
-
-
-def default_empty_preset():
+def default_preset():
+    """Create empty preset"""
     return {"keys": {}}
 
 
-def normalize_preset(preset):
-    if not isinstance(preset, dict):
-        return default_empty_preset()
-    keys = preset.get("keys")
-    if isinstance(keys, dict):
-        normalized = {"keys": {}}
-        for key_id, action in keys.items():
-            if isinstance(action, dict):
-                normalized["keys"][key_id] = {
-                    "type": action.get("type", "none"),
-                    "value": safe_text(action.get("value", "")),
-                }
-            else:
-                normalized["keys"][key_id] = {"type": "none", "value": ""}
-        return normalized
-    return default_empty_preset()
+class PresetManager:
+    """Manage presets loading/saving"""
 
+    def __init__(self):
+        self.presets = {"Default": default_preset()}
+        self.current = "Default"
+        self.keyboard_names = {}
+        self.settings = {}
+        self.load()
 
-def build_default_presets():
-    return {"Default": default_empty_preset()}
-
-
-class NumpadStreamDeckApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(APP_NAME)
-        self.root.geometry("980x720")
-        self.root.configure(bg="#eef3f8")
-        self.root.minsize(900, 660)
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-        self.style.configure("Pad.TButton", background="#f3f5f7", foreground="#111827", borderwidth=1, relief="flat", padding=18, font=("Segoe UI", 12, "bold"))
-        self.style.map("Pad.TButton", background=[("active", "#dfeaf6"), ("pressed", "#d5e3f3")], foreground=[("active", "#0f172a")])
-        self.style.configure("PadActive.TButton", background="#dfefff", foreground="#0b5ed7", borderwidth=2, relief="flat", padding=18, font=("Segoe UI", 12, "bold"))
-        self.style.map("PadActive.TButton", background=[("active", "#cfe3ff"), ("pressed", "#b9d6ff")], foreground=[("active", "#0a3d8f")])
-
-        self.enabled = True
-        self.current_preset_name = "Default"
-        self.presets = {}
-        self.recording_target = None
-        self.recording_callback = None
-        self.tray_icon = None
-        self.key_buttons = {}
-        self.keyboard_device_id = ""
-        self.keyboard_device_var = StringVar(value="")
-        self.available_keyboard_devices = []
-        self.selected_keyboard_handle = None
-        self.device_test_active = False
-        self.device_test_status_var = StringVar(value="")
-        self.device_test_button_var = StringVar(value="")
-        self.native_raw_input_helper = Path(__file__).resolve().parent / "cpp" / "raw_input_filter.exe"
-        self.native_raw_input_available = self.native_raw_input_helper.exists()
-        self.raw_input_enabled = False
-        self._raw_input_error = None
-        self._raw_input_hook_installed = False
-        self._raw_input_devices = []
-        self._raw_input_window_proc = None
-        self._raw_input_wndproc_original = None
-        self._raw_input_message_hwnd = None
-        self._raw_input_message_class = None
-        self.native_bridge_process = None
-        self.native_bridge_reader = None
-        self.native_bridge_running = False
-        self._setup_windows_raw_input()
-
-        self.header_var = StringVar(value="Numpad Stream Deck")
-        self.status_var = StringVar(value="Enabled")
-        self.preset_var = StringVar()
-
-        ensure_appdata_dir()
-        self.load_presets()
-        self.build_ui()
-        self.refresh_preset_selector()
-        self.update_key_buttons()
-        self.update_status_display()
-        self.setup_global_hotkeys()
-        self.create_tray_icon()
-
-    def build_ui(self):
-        main = ttk.Frame(self.root)
-        main.pack(fill="both", expand=True)
-
-        # Header
-        header = ttk.Frame(main, padding=(18, 14, 18, 0))
-        header.pack(fill="x")
-        ttk.Label(header, textvariable=self.header_var, font=("Segoe UI", 20, "bold"), foreground="#0f172a").pack(side="left")
-        self.status_label = ttk.Label(header, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), foreground="#16a34a")
-        self.status_label.pack(side="right")
-
-        # Tabs
-        self.notebook = ttk.Notebook(main)
-        self.notebook.pack(fill="both", expand=True, padx=0, pady=(12, 0))
-
-        # Tab 1: Presets
-        self.tab_presets = ttk.Frame(self.notebook, padding=18)
-        self.notebook.add(self.tab_presets, text="Presets")
-
-        # Keyboard selector
-        keyboard_frame = ttk.LabelFrame(self.tab_presets, text="Select Keyboard", padding=10)
-        keyboard_frame.pack(fill="x", pady=(0, 12))
-        
-        self.keyboard_device_combo_presets = ttk.Combobox(keyboard_frame, textvariable=self.keyboard_device_var, state="readonly", width=40)
-        self.keyboard_device_combo_presets.pack(fill="x")
-        
-        # Presets selector
-        presets_frame = ttk.LabelFrame(self.tab_presets, text="Presets", padding=10)
-        presets_frame.pack(fill="x", pady=(0, 12))
-        
-        self.preset_combo = ttk.Combobox(presets_frame, textvariable=self.preset_var, state="readonly", width=40)
-        self.preset_combo.pack(fill="x")
-        self.preset_combo.bind("<<ComboboxSelected>>", lambda event: self.switch_preset(self.preset_var.get()))
-
-        # Preset controls - simplified
-        controls = ttk.Frame(self.tab_presets)
-        controls.pack(fill="x", pady=(0, 16))
-
-        ttk.Button(controls, text="+", command=self.assign_new_key, width=3).pack(side="left")
-
-        # Keyboard pad
-        pad = ttk.Frame(self.tab_presets)
-        pad.pack(fill="both", expand=True)
-
-        self.pad_frame = tk.Frame(pad, bg="#eef3f8")
-        self.pad_frame.pack(fill="both", expand=True)
-
-        self.key_list_container = ttk.Frame(self.pad_frame)
-        self.key_list_container.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self.update_key_buttons()
-
-        # Tab 2: Settings
-        self.tab_settings = ttk.Frame(self.notebook, padding=18)
-        self.notebook.add(self.tab_settings, text="Settings")
-        self.build_settings_tab()
-
-        self.root.bind("<Escape>", self.hide_window)
-
-    def build_settings_tab(self):
-        # Status section
-        status_frame = ttk.LabelFrame(self.tab_settings, text="Application Status", padding=12)
-        status_frame.pack(fill="x", pady=(0, 16))
-
-        status_inner = ttk.Frame(status_frame)
-        status_inner.pack(fill="x")
-        ttk.Label(status_inner, text="State:", font=("Segoe UI", 10)).pack(side="left", padx=(0, 8))
-        ttk.Label(status_inner, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), foreground="#16a34a").pack(side="left")
-
-        toggle_frame = ttk.Frame(status_frame)
-        toggle_frame.pack(fill="x", pady=(12, 0))
-        ttk.Button(toggle_frame, text="Toggle Enabled/Disabled (CTRL+ALT+F12)", command=self.toggle_enabled).pack(side="left")
-
-        keyboard_source_frame = ttk.LabelFrame(self.tab_settings, text="Keyboard source", padding=12)
-        keyboard_source_frame.pack(fill="x", pady=(0, 16))
-
-        self.keyboard_device_combo = ttk.Combobox(keyboard_source_frame, textvariable=self.keyboard_device_var, state="readonly", width=40)
-        self.keyboard_device_combo.pack(fill="x", pady=(0, 8))
-
-        device_row = ttk.Frame(keyboard_source_frame)
-        device_row.pack(fill="x")
-        ttk.Button(device_row, text="Refresh devices", command=self.refresh_keyboard_devices).pack(side="left")
-        ttk.Button(device_row, text="Apply", command=self.apply_keyboard_device_filter).pack(side="left", padx=(8, 0))
-        ttk.Button(device_row, text="Clear", command=self.clear_keyboard_device_filter).pack(side="left", padx=(4, 0))
-
-        self.device_test_button = ttk.Button(keyboard_source_frame, text="Testar dispositivo", command=self.toggle_device_test_mode)
-        self.device_test_button.pack(anchor="w", pady=(10, 6))
-        self.device_test_button.state(["disabled"]) if not self.can_test_selected_keyboard() else None
-
-        self.device_test_panel = ttk.Frame(keyboard_source_frame, padding=(12, 8), relief="solid", borderwidth=1)
-        self.device_test_panel.pack(fill="x")
-        self.device_test_status_var.set("Aguardando teste...")
-        ttk.Label(self.device_test_panel, textvariable=self.device_test_status_var, font=("Segoe UI", 10, "bold"), foreground="#111827").pack(anchor="w")
-
-        self.device_test_led = ttk.Label(self.device_test_panel, text="●", font=("Segoe UI", 28, "bold"), foreground="#cbd5e1")
-        self.device_test_led.pack(anchor="w", pady=(4, 0))
-
-        if self._raw_input_error:
-            ttk.Label(
-                keyboard_source_frame,
-                text=self._raw_input_error,
-                foreground="#b91c1c",
-                font=("Segoe UI", 9),
-                justify="left",
-            ).pack(anchor="w", pady=(8, 0))
-        else:
-            ttk.Label(
-                keyboard_source_frame,
-                text="Selecione o teclado físico que deve responder aos atalhos. Deixe em branco para aceitar qualquer teclado.",
-                foreground="#6b7280",
-                font=("Segoe UI", 9),
-                justify="left",
-            ).pack(anchor="w", pady=(8, 0))
-
-        self.refresh_keyboard_devices()
-        if self.raw_input_enabled:
-            self.setup_raw_input_listener()
-            self.refresh_keyboard_devices()
-
-        # Startup section
-        startup_frame = ttk.LabelFrame(self.tab_settings, text="Startup", padding=12)
-        startup_frame.pack(fill="x", pady=(0, 16))
-
-        self.startup_var = BooleanVar(value=False)
-        ttk.Checkbutton(startup_frame, text="Start with Windows", variable=self.startup_var).pack(anchor="w", pady=4)
-        ttk.Label(startup_frame, text="The application will be added to Windows startup list.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w")
-
-        # Hotkeys section
-        hotkeys_frame = ttk.LabelFrame(self.tab_settings, text="Keyboard Shortcuts", padding=12)
-        hotkeys_frame.pack(fill="x", pady=(0, 16))
-
-        hotkey_rows = [
-            ("Toggle numpad:", "CTRL + ALT + F12"),
-            ("Switch to Default preset:", "CTRL + ALT + 1"),
-        ]
-
-        for label, key in hotkey_rows:
-            row = ttk.Frame(hotkeys_frame)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, font=("Segoe UI", 10)).pack(side="left", padx=(0, 12))
-            ttk.Label(row, text=key, font=("Segoe UI", 10, "bold"), foreground="#0b5ed7").pack(side="left")
-
-        # About section
-        about_frame = ttk.LabelFrame(self.tab_settings, text="About", padding=12)
-        about_frame.pack(fill="x", pady=(0, 0))
-
-        ttk.Label(about_frame, text="Numpad Stream Deck", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        ttk.Label(about_frame, text="Version v2", foreground="#6b7280").pack(anchor="w")
-        ttk.Label(about_frame, text="A lightweight custom keyboard shortcuts application.", foreground="#6b7280", font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
-
-    def get_key_label(self, key_id):
-        label_map = {
-            "numlock": "NumLock",
-            "backspace": "Backspace",
-            "del": "Del",
-            "enter": "Enter",
-            "000": "000",
-        }
-        return label_map.get(key_id, key_id)
-
-    def load_presets(self):
+    def load(self):
+        """Load presets from file"""
         if not PRESET_FILE.exists():
-            self.presets = build_default_presets()
-            self.current_preset_name = "Default"
-            self.save_presets()
+            self.presets = {"Default": default_preset()}
+            self.save()
             return
 
         try:
-            with open(PRESET_FILE, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            with open(PRESET_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
             if isinstance(data, dict) and "presets" in data:
                 self.presets = data["presets"]
-                self.current_preset_name = data.get("current_preset", self.current_preset_name)
+                self.current = data.get("current_preset", "Default")
+                self.keyboard_names = data.get("keyboard_names", {})
+                self.settings = data.get("settings", {})
             else:
-                self.presets = data if isinstance(data, dict) else build_default_presets()
-                self.current_preset_name = self.current_preset_name if self.current_preset_name in self.presets else next(iter(self.presets))
+                self.presets = data if isinstance(data, dict) else {"Default": default_preset()}
         except Exception:
-            self.presets = build_default_presets()
-            self.current_preset_name = "Default"
+            self.presets = {"Default": default_preset()}
 
-        legacy_names = {"Gaming", "Discord", "BeamNG"}
-        if any(name in self.presets for name in legacy_names):
-            self.presets = {"Default": self.presets.get("Default", default_empty_preset())}
-            self.current_preset_name = "Default"
-
-        normalized_presets = {}
-        for name, preset in self.presets.items():
-            normalized_presets[name] = normalize_preset(preset)
-        self.presets = normalized_presets
-
+        # Ensure Default preset exists
         if "Default" not in self.presets:
-            self.presets["Default"] = default_empty_preset()
+            self.presets["Default"] = default_preset()
+        if self.current not in self.presets:
+            self.current = "Default"
+        if not isinstance(self.keyboard_names, dict):
+            self.keyboard_names = {}
+        if not isinstance(self.settings, dict):
+            self.settings = {}
 
-        if not self.current_preset_name or self.current_preset_name not in self.presets:
-            self.current_preset_name = "Default"
-
-        self.presets = {"Default": self.presets.get("Default", default_empty_preset())}
-        self.current_preset_name = "Default"
-
-    def save_presets(self):
+    def save(self):
+        """Save presets to file"""
         ensure_appdata_dir()
-        payload = {
-            "current_preset": self.current_preset_name,
-            "presets": self.presets,
-        }
-        with open(PRESET_FILE, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        with open(PRESET_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "current_preset": self.current,
+                    "presets": self.presets,
+                    "keyboard_names": self.keyboard_names,
+                    "settings": self.settings,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
-    def refresh_preset_selector(self):
-        items = list(self.presets.keys())
-        if hasattr(self, "preset_combo"):
-            self.preset_combo["values"] = items
-        if self.current_preset_name not in items:
-            if items:
-                self.current_preset_name = items[0]
-            else:
-                self.current_preset_name = "Default"
-        self.preset_var.set(self.current_preset_name)
-        if hasattr(self, "preset_combo"):
-            self.preset_combo.set(self.current_preset_name)
+    def get_current(self):
+        """Get current preset"""
+        return self.presets.get(self.current, default_preset())
 
-    def switch_preset(self, preset_name):
-        if not preset_name or preset_name not in self.presets:
-            return
-        self.current_preset_name = preset_name
-        self.save_presets()
-        self.update_key_buttons()
-
-    def create_preset(self):
-        name = self.prompt_name("New Preset", "Enter preset name:")
-        if not name:
-            return
+    def switch(self, name):
+        """Switch to preset"""
         if name in self.presets:
-            messagebox.showerror(APP_NAME, "This preset already exists.")
+            self.current = name
+            self.save()
+
+    def create(self, name):
+        """Create and select a new preset."""
+        name = str(name or "").strip()
+        if not name or name in self.presets:
+            return False
+        self.presets[name] = default_preset()
+        self.current = name
+        self.save()
+        return True
+
+    def delete(self, name):
+        """Delete a preset while keeping Default available."""
+        if name == "Default" or name not in self.presets:
+            return False
+        del self.presets[name]
+        self.current = "Default"
+        self.save()
+        return True
+
+
+class NumpadStreamDeckApp:
+    """Main application"""
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title(APP_NAME)
+        self.root.geometry("900x650")
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
+
+        self.presets = PresetManager()
+        self.enabled = not bool(self.presets.settings.get("disabled", False))
+        self.recording_key = None
+        self.recording_callback = None
+        self.keyboard_device_id = ""
+        self.keyboard_device_var = StringVar(value="All keyboards")
+        self.keyboard_full_id_var = StringVar(value="No keyboard selected")
+        self.available_keyboard_devices = []
+        self.native_helper = Path(__file__).resolve().parent / "cpp" / "raw_input_filter.exe"
+        self.native_process = None
+        self.native_reader = None
+        self.shortcut_recording_callback = None
+        self.toggle_states = {}
+        self.last_press_times = {}
+        self.device_test_active = False
+        self.device_test_status_var = StringVar(value="")
+        self.startup_var = BooleanVar(value=bool(self.presets.settings.get("startup", False)))
+        self.minimize_on_close_var = BooleanVar(
+            value=bool(self.presets.settings.get("minimize_on_close", False))
+        )
+        self.disable_streamdeck_var = BooleanVar(
+            value=bool(self.presets.settings.get("disabled", False))
+        )
+
+        self.status_var = StringVar(value="Enabled" if self.enabled else "Disabled")
+        self.preset_var = StringVar(value=self.presets.current)
+
+        self._build_ui()
+        self._setup_hotkeys()
+        self._create_tray()
+        self._listen_keys()
+
+    def _build_ui(self):
+        """Build UI"""
+        # Header
+        header = ttk.Frame(self.root, padding=12)
+        header.pack(fill="x")
+        ttk.Label(header, text=APP_NAME, font=("Arial", 16, "bold")).pack(side="left")
+        self.status_label = ttk.Label(
+            header, textvariable=self.status_var, font=("Arial", 10), foreground="#16a34a"
+        )
+        self.status_label.pack(side="right")
+
+        # Tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=12, pady=0)
+
+        # Tab 1: Presets
+        self.tab_presets = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(self.tab_presets, text="Presets")
+        self._build_presets_tab()
+
+        # Tab 2: Settings
+        self.tab_settings = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(self.tab_settings, text="Settings")
+        self._build_settings_tab()
+
+    def _build_presets_tab(self):
+        """Build presets tab"""
+        # Presets selector
+        presets_frame = ttk.LabelFrame(self.tab_presets, text="Presets", padding=10)
+        presets_frame.pack(fill="x", pady=(0, 12))
+
+        self.preset_combo = ttk.Combobox(
+            presets_frame,
+            textvariable=self.preset_var,
+            values=list(self.presets.presets.keys()),
+            state="readonly",
+        )
+        self.preset_combo.pack(fill="x")
+        self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self._switch_preset())
+        preset_controls = ttk.Frame(presets_frame)
+        preset_controls.pack(fill="x", pady=(8, 0))
+        ttk.Button(preset_controls, text="New preset", command=self._create_preset).pack(side="left")
+        ttk.Button(preset_controls, text="Delete preset", command=self._delete_preset).pack(
+            side="left", padx=(6, 0)
+        )
+
+        # Controls
+        controls = ttk.Frame(self.tab_presets)
+        controls.pack(fill="x", pady=(0, 12))
+        ttk.Label(controls, text="Functions").pack(side="left", padx=(4, 8))
+        ttk.Button(controls, text="+", width=3, command=self._assign_key).pack(side="left")
+
+        # Keys list
+        self.keys_container = ttk.Frame(self.tab_presets)
+        self.keys_container.pack(fill="both", expand=True)
+
+        self._refresh_keys()
+
+    def _build_settings_tab(self):
+        """Build settings tab"""
+        device_frame = ttk.LabelFrame(self.tab_settings, text="Keyboard filter", padding=10)
+        device_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(device_frame, text="Only process keys from:").pack(anchor="w")
+        self.keyboard_device_combo = ttk.Combobox(
+            device_frame, textvariable=self.keyboard_device_var, state="readonly"
+        )
+        self.keyboard_device_combo.pack(fill="x", pady=(4, 6))
+        self.keyboard_device_combo.bind("<<ComboboxSelected>>", self._select_keyboard_device)
+        ttk.Label(device_frame, text="Full device ID:").pack(anchor="w")
+        ttk.Entry(
+            device_frame,
+            textvariable=self.keyboard_full_id_var,
+            state="readonly",
+        ).pack(fill="x", pady=(2, 6))
+        ttk.Button(
+            device_frame, text="Refresh keyboards", command=self._refresh_keyboard_devices
+        ).pack(anchor="w")
+        ttk.Button(
+            device_frame, text="Rename selected keyboard", command=self._rename_keyboard
+        ).pack(anchor="w", pady=(6, 0))
+        self.device_test_button = ttk.Button(
+            device_frame, text="Test keyboard", command=self._toggle_keyboard_test
+        )
+        self.device_test_button.pack(anchor="w", pady=(6, 0))
+        ttk.Label(device_frame, textvariable=self.device_test_status_var).pack(
+            anchor="w", pady=(4, 0)
+        )
+        self._refresh_keyboard_devices()
+
+        preferences = ttk.LabelFrame(self.tab_settings, text="Application", padding=10)
+        preferences.pack(fill="x", pady=(12, 0))
+        ttk.Checkbutton(
+            preferences,
+            text="Start with Windows",
+            variable=self.startup_var,
+            command=self._set_start_with_windows,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            preferences,
+            text="Minimize to tray when closing",
+            variable=self.minimize_on_close_var,
+            command=self._save_preferences,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            preferences,
+            text="Disable Stream Deck",
+            variable=self.disable_streamdeck_var,
+            command=self._set_streamdeck_disabled,
+        ).pack(anchor="w")
+        ttk.Label(preferences, text="Toggle shortcut: CTRL+ALT+F12").pack(anchor="w", pady=(8, 0))
+
+    def _create_preset(self):
+        name = simpledialog.askstring(APP_NAME, "Preset name:", parent=self.root)
+        if self.presets.create(name):
+            self.preset_var.set(self.presets.current)
+            self.preset_combo["values"] = list(self.presets.presets)
+            self._refresh_keys()
+        elif name:
+            messagebox.showwarning(APP_NAME, "A preset with that name already exists")
+
+    def _delete_preset(self):
+        name = self.presets.current
+        if name == "Default":
+            messagebox.showwarning(APP_NAME, "The Default preset cannot be deleted")
             return
-        self.presets[name] = default_empty_preset()
-        self.current_preset_name = name
-        self.save_presets()
-        self.refresh_preset_selector()
-        self.update_key_buttons()
+        if messagebox.askyesno(APP_NAME, f"Delete preset '{name}'?", parent=self.root):
+            self.presets.delete(name)
+            self.preset_var.set(self.presets.current)
+            self.preset_combo["values"] = list(self.presets.presets)
+            self._refresh_keys()
 
-    def duplicate_preset(self):
-        source = self.current_preset_name
-        duplicated = self.prompt_name("Duplicate Preset", f"Name for copy of '{source}':")
-        if not duplicated:
-            return
-        if duplicated in self.presets:
-            messagebox.showerror(APP_NAME, "A preset with this name already exists.")
-            return
-        self.presets[duplicated] = json.loads(json.dumps(self.presets[source]))
-        self.current_preset_name = duplicated
-        self.save_presets()
-        self.refresh_preset_selector()
-        self.update_key_buttons()
+    def _save_preferences(self):
+        self.presets.settings["minimize_on_close"] = self.minimize_on_close_var.get()
+        self.presets.settings["disabled"] = self.disable_streamdeck_var.get()
+        self.presets.save()
 
-    def rename_preset(self):
-        current = self.current_preset_name
-        new_name = self.prompt_name("Rename Preset", "New name:", default=current)
-        if not new_name or not new_name.strip():
-            return
-        if new_name in self.presets and new_name != current:
-            messagebox.showerror(APP_NAME, "This name already exists.")
-            return
-        if new_name == current:
-            return
-        preset = self.presets.pop(current)
-        self.presets[new_name] = preset
-        self.current_preset_name = new_name
-        self.save_presets()
-        self.refresh_preset_selector()
-        self.update_key_buttons()
+    def _set_streamdeck_disabled(self):
+        self.enabled = not self.disable_streamdeck_var.get()
+        self._toggle_status_display()
+        self._save_preferences()
 
-    def delete_preset(self):
-        if len(self.presets) <= 1:
-            messagebox.showwarning(APP_NAME, "You must keep at least one preset.")
-            return
-        current = self.current_preset_name
-        if messagebox.askyesno(APP_NAME, f"Delete preset '{current}'?"):
-            del self.presets[current]
-            self.current_preset_name = next(iter(self.presets))
-            self.save_presets()
-            self.refresh_preset_selector()
-            self.update_key_buttons()
+    def _toggle_status_display(self):
+        self.status_var.set("Enabled" if self.enabled else "Disabled")
+        self.status_label.config(foreground="#16a34a" if self.enabled else "#d97706")
 
-    def prompt_name(self, title, prompt, default=""):
-        dialog = Toplevel(self.root)
-        dialog.title(title)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.geometry("380x120")
-        ttk.Label(dialog, text=prompt).pack(anchor="w", padx=14, pady=(14, 6))
-        value = StringVar(value=default)
-        entry = ttk.Entry(dialog, textvariable=value, width=28)
-        entry.pack(fill="x", padx=14, pady=(0, 12))
-        entry.focus_set()
+    def _set_start_with_windows(self):
+        try:
+            import winreg
 
-        def accept():
-            result = value.get().strip()
-            dialog.result = result
-            dialog.destroy()
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                if self.startup_var.get():
+                    if getattr(sys, "frozen", False):
+                        startup_command = sys.executable
+                    else:
+                        startup_command = f'"{sys.executable}" "{Path(__file__).resolve()}"'
+                    winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, startup_command)
+                else:
+                    try:
+                        winreg.DeleteValue(key, APP_NAME)
+                    except FileNotFoundError:
+                        pass
+            self.presets.settings["startup"] = self.startup_var.get()
+            self.presets.save()
+        except (OSError, ImportError) as error:
+            self.startup_var.set(False)
+            messagebox.showerror(APP_NAME, f"Could not update Windows startup: {error}")
 
-        ttk.Button(dialog, text="OK", command=accept).pack(pady=8)
-        dialog.result = ""
-        dialog.wait_window(dialog)
-        return dialog.result
+    def _refresh_keys(self):
+        """Refresh keys list"""
+        for w in self.keys_container.winfo_children():
+            w.destroy()
 
-    def get_current_preset(self):
-        preset = self.presets.get(self.current_preset_name, default_empty_preset())
-        cleaned = normalize_preset(preset)
-        self.presets[self.current_preset_name] = cleaned
-        return cleaned
+        preset = self.presets.get_current()
+        keys = preset.get("keys", {})
 
-    def apply_action_choice(self, key_id, selected_label):
-        preset = self.get_current_preset()
-        code = ACTION_MAP.get(selected_label, "none")
-        if code == "none":
-            preset["keys"][key_id] = {"type": "none", "value": ""}
-        else:
-            current = preset["keys"].get(key_id, {"type": "none", "value": ""})
-            preset["keys"][key_id] = {
-                "type": code,
-                "value": current.get("value", ""),
-            }
-        self.save_presets()
-        self.update_key_buttons()
-
-    def update_key_buttons(self):
-        preset = self.get_current_preset()
-        if not hasattr(self, "key_list_container"):
-            return
-
-        for widget in list(self.key_list_container.winfo_children()):
-            widget.destroy()
-        self.key_buttons = {}
-
-        key_ids = self.get_visible_key_ids(preset)
-        if not key_ids:
-            empty = ttk.Label(
-                self.key_list_container,
-                text="Nenhuma tecla atribuída ainda",
-                foreground="#6b7280",
-                font=("Segoe UI", 10),
+        if not keys:
+            ttk.Label(self.keys_container, text="No keys assigned", foreground="#999").pack(
+                pady=20
             )
-            empty.pack(anchor="center", pady=30)
             return
 
-        for key_id in key_ids:
-            action = preset["keys"].get(key_id, {"type": "none", "value": ""})
-            action_type = action.get("type", "none")
-            row = ttk.Frame(self.key_list_container, padding=(8, 6))
-            row.pack(fill="x", pady=2)
+        for key_id, action in sorted(keys.items()):
+            self._add_key_row(key_id, action)
 
-            key_text = key_id if key_id.startswith("key") else self.get_key_label(key_id)
-            key_label = ttk.Label(row, text=key_text, font=("Segoe UI", 12, "bold"), width=14)
-            key_label.pack(side="left")
+    def _add_key_row(self, key_id, action):
+        """Add a key row"""
+        row = ttk.Frame(self.keys_container)
+        row.pack(fill="x", pady=4)
 
-            function_var = StringVar(value="None" if action_type == "none" else self.translate_type(action_type))
-            combo = ttk.Combobox(
-                row,
-                textvariable=function_var,
-                values=["None"] + list(ACTION_MAP.keys())[1:],
-                state="readonly",
-                width=28,
-            )
-            combo.pack(side="left", padx=(20, 8), fill="x", expand=True)
-            combo.bind("<<ComboboxSelected>>", lambda event, k=key_id, var=function_var: self.apply_action_choice(k, var.get()))
+        # Key label
+        key_label = ttk.Label(
+            row,
+            text=self._display_key_id(key_id, action.get("name", "")),
+            font=("Arial", 10, "bold"),
+            width=32,
+        )
+        key_label.pack(side="left")
 
-            delete_button = ttk.Button(row, text="-", width=2, command=lambda k=key_id: self.delete_key_action_direct(k))
-            delete_button.pack(side="right", padx=(0, 4))
-
-            edit_button = ttk.Button(row, text="Editar", command=lambda k=key_id: self.edit_key_action(k))
-            edit_button.pack(side="right", padx=(0, 4))
-
-            if action_type == "none":
-                key_label.configure(foreground="#6b7280")
-            else:
-                key_label.configure(foreground="#0b5ed7")
-
-            self.key_buttons[key_id] = row
-
-    def get_button_text(self, key_id, action):
-        label = self.get_key_label(key_id)
+        # Action combobox
         action_type = action.get("type", "none")
-        if action_type == "none":
-            return label
-        action_label = self.translate_type(action_type)
-        if len(action_label) > 12:
-            action_label = action_label[:10] + "..."
-        return f"{label}\n{action_label}"
+        action_label = self._get_action_label(action_type)
 
-    def get_visible_key_ids(self, preset=None):
-        source = preset or self.get_current_preset()
-        keys = []
-        for key_id in sorted(source["keys"].keys()):
-            if key_id:
-                keys.append(key_id)
-        return keys
+        action_var = StringVar(value=action_label)
+        combo = ttk.Combobox(
+            row,
+            textvariable=action_var,
+            values=["None"] + list(ACTION_MAP.keys())[1:],
+            state="readonly",
+            width=25,
+        )
+        combo.pack(side="left", padx=(20, 8), fill="x", expand=True)
+        combo.bind("<<ComboboxSelected>>", lambda e: self._set_action(key_id, action_var.get()))
 
-    def _normalize_assigned_key_id(self, key_name=None, scan_code=None, vk_code=None):
-        if scan_code is not None:
-            return f"key{int(scan_code)}"
-        if vk_code is not None:
-            return f"key{int(vk_code)}"
-        if key_name is None:
-            return ""
-        normalized = str(key_name).strip().lower()
-        alias_map = {
-            "kp0": "key0",
-            "kp1": "key1",
-            "kp2": "key2",
-            "kp3": "key3",
-            "kp4": "key4",
-            "kp5": "key5",
-            "kp6": "key6",
-            "kp7": "key7",
-            "kp8": "key8",
-            "kp9": "key9",
-            "num lock": "numlock",
-            "numpad divide": "/",
-            "numpad multiply": "*",
-            "numpad minus": "-",
-            "numpad plus": "+",
-            "numpad enter": "enter",
-            "space": "space",
-        }
-        if normalized in alias_map:
-            return alias_map[normalized]
-        return normalized
+        # Edit button
+        ttk.Button(row, text="Edit", command=lambda: self._edit_key(key_id)).pack(side="right", padx=(4, 0))
 
-    def assign_new_key(self):
+        # Delete button
+        ttk.Button(row, text="-", width=2, command=lambda: self._delete_key(key_id)).pack(side="right")
+
+    def _assign_key(self):
+        """Open assign key dialog"""
         dialog = Toplevel(self.root)
         dialog.title("Assign Key")
-        dialog.geometry("380x200")
+        dialog.geometry("460x600")
+        dialog.minsize(460, 600)
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
 
-        detected_key_var = StringVar(value="")
-        function_var = StringVar(value="None")
-        
-        # Key detection section
-        ttk.Label(dialog, text="Press a key:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(14, 8))
-        key_label = ttk.Label(dialog, text="Waiting...", font=("Segoe UI", 11), foreground="#0b5ed7")
+        key_var = StringVar(value="")
+        name_var = StringVar(value="")
+        func_var = StringVar(value="None")
+        value_var = StringVar(value="")
+        toggle_var = BooleanVar(value=False)
+        double_click_var = BooleanVar(value=False)
+        delay_var = StringVar(value="0")
+
+        ttk.Label(dialog, text="Press a key:", font=("Arial", 10, "bold")).pack(anchor="w", padx=14, pady=(14, 8))
+        key_label = ttk.Label(dialog, text="Waiting...", font=("Arial", 11), foreground="#0066cc")
         key_label.pack(anchor="w", padx=14, pady=(0, 12))
-        
-        # Function selection section
-        ttk.Label(dialog, text="Function:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=14, pady=(0, 4))
-        combo = ttk.Combobox(dialog, textvariable=function_var, values=["None"] + list(ACTION_MAP.keys())[1:], state="readonly")
-        combo.pack(fill="x", padx=14, pady=(0, 16))
-        
-        # Buttons
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(fill="x", padx=14, pady=(0, 14))
-        
-        def save_action():
-            key_id = detected_key_var.get().strip()
-            if not key_id:
-                messagebox.showwarning(APP_NAME, "Please detect a key first.")
+        assign_button = ttk.Button(
+            dialog,
+            text="Assign key",
+            command=lambda: self._begin_key_capture(key_var, key_label, assign_button),
+        )
+        assign_button.pack(anchor="w", padx=14, pady=(0, 12))
+
+        ttk.Label(dialog, text="Function:", font=("Arial", 10, "bold")).pack(anchor="w", padx=14, pady=(0, 4))
+        func_combo = ttk.Combobox(
+            dialog, textvariable=func_var, values=["None"] + list(ACTION_MAP.keys())[1:], state="readonly"
+        )
+        func_combo.pack(fill="x", padx=14, pady=(0, 16))
+
+        ttk.Label(dialog, text="Key name:").pack(anchor="w", padx=14, pady=(0, 4))
+        ttk.Entry(dialog, textvariable=name_var).pack(fill="x", padx=14)
+        ttk.Label(dialog, text="Value:").pack(anchor="w", padx=14, pady=(10, 4))
+        ttk.Entry(dialog, textvariable=value_var).pack(fill="x", padx=14)
+        shortcut_button = ttk.Button(
+            dialog,
+            text="Record shortcut",
+            command=lambda: self._start_shortcut_recording(value_var, shortcut_button),
+        )
+        shortcut_button.pack(anchor="w", padx=14, pady=(6, 0))
+
+        def update_shortcut_controls(_event=None):
+            shortcut_button.state(
+                ["!disabled"] if func_var.get() == "Keyboard Shortcut" else ["disabled"]
+            )
+
+        func_combo.bind("<<ComboboxSelected>>", update_shortcut_controls)
+        update_shortcut_controls()
+        options = ttk.LabelFrame(dialog, text="Activation", padding=8)
+        options.pack(fill="x", padx=14, pady=(10, 4))
+        ttk.Checkbutton(options, text="Toggle", variable=toggle_var).pack(anchor="w")
+        ttk.Checkbutton(options, text="Double click", variable=double_click_var).pack(anchor="w")
+        delay_row = ttk.Frame(options)
+        delay_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(delay_row, text="Delay (ms):").pack(side="left")
+        ttk.Entry(delay_row, textvariable=delay_var, width=10).pack(side="left", padx=(8, 0))
+
+        def browse():
+            selected = filedialog.askopenfilename(
+                filetypes=[("Executables", "*.exe"), ("All files", "*.*")]
+            )
+            if selected:
+                value_var.set(selected)
+
+        ttk.Button(dialog, text="Browse", command=browse).pack(anchor="w", padx=14, pady=(6, 0))
+
+        def on_key(event):
+            if not getattr(self, "_assigning", False):
                 return
-            
-            preset = self.get_current_preset()
-            selected_label = function_var.get()
-            code = ACTION_MAP.get(selected_label, "none")
-            preset["keys"][key_id] = {"type": code, "value": ""}
-            self.save_presets()
-            self.cancel_key_assignment()
-            self.update_key_buttons()
-            dialog.destroy()
-        
-        ttk.Button(button_frame, text="Save", command=save_action).pack(side="left", padx=(0, 4))
-        ttk.Button(button_frame, text="Cancel", command=lambda: [self.cancel_key_assignment(), dialog.destroy()]).pack(side="left")
-        
-        # Start listening for key press
-        self._pending_key_assignment = True
-        self._assignment_dialog = dialog
-        self._assignment_key_callback = keyboard.on_press(lambda event: self._handle_key_assignment_new(event, detected_key_var, key_label))
-        
-        # Handle dialog close
-        def on_dialog_close():
-            self.cancel_key_assignment()
-            dialog.destroy()
-        
-        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
-
-    def _handle_key_assignment(self, event):
-        if not getattr(self, "_pending_key_assignment", False):
-            return
-        if getattr(event, "name", "").lower() in {"esc", "escape"}:
-            self.cancel_key_assignment()
-            return
-
-        key_id = self._normalize_assigned_key_id(
-            key_name=getattr(event, "name", None),
-            scan_code=getattr(event, "scan_code", None),
-            vk_code=getattr(event, "vk", None),
-        )
-        if not key_id:
-            return
-
-        preset = self.get_current_preset()
-        preset["keys"][key_id] = {"type": "none", "value": ""}
-        self.save_presets()
-        self.cancel_key_assignment()
-        self.update_key_buttons()
-        self.edit_key_action(key_id)
-
-    def _handle_key_assignment_new(self, event, detected_key_var, key_label):
-        """Handle key detection in the compact assign dialog"""
-        if not getattr(self, "_pending_key_assignment", False):
-            return
-        if getattr(event, "name", "").lower() in {"esc", "escape"}:
-            self.cancel_key_assignment()
-            if hasattr(self, "_assignment_dialog") and self._assignment_dialog.winfo_exists():
-                self._assignment_dialog.destroy()
-            return
-
-        key_id = self._normalize_assigned_key_id(
-            key_name=getattr(event, "name", None),
-            scan_code=getattr(event, "scan_code", None),
-            vk_code=getattr(event, "vk", None),
-        )
-        if not key_id:
-            return
-        
-        # Update the dialog with detected key
-        detected_key_var.set(key_id)
-        key_label.configure(text=f"Detected: {self.get_key_label(key_id)}", foreground="#16a34a")
-
-    def cancel_key_assignment(self):
-        if getattr(self, "_assignment_key_callback", None) is not None:
-            keyboard.unhook(self._assignment_key_callback)
-            self._assignment_key_callback = None
-        self._pending_key_assignment = False
-
-    def delete_key_action_direct(self, key_id):
-        """Delete a key assignment immediately"""
-        if messagebox.askyesno(APP_NAME, f"Delete '{self.get_key_label(key_id)}'?"):
-            preset = self.get_current_preset()
-            if key_id in preset["keys"]:
-                del preset["keys"][key_id]
-                self.save_presets()
-                self.update_key_buttons()
-
-    def translate_type(self, action_type):
-        for label, code in ACTION_MAP.items():
-            if code == action_type:
-                return label
-        return "Ação"
-
-    def edit_key_action(self, key_id):
-        preset = self.get_current_preset()
-        action = preset["keys"].get(key_id, {"type": "none", "value": ""})
-        dialog = Toplevel(self.root)
-        dialog.title(f"Edit Action - {self.get_key_label(key_id)}")
-        dialog.geometry("440x330")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        mode_var = StringVar(value=self.translate_type(action.get("type", "none")))
-        value_var = StringVar(value=safe_text(action.get("value", "")))
-
-        ttk.Label(dialog, text="Action:").pack(anchor="w", padx=14, pady=(14, 4))
-        combo = ttk.Combobox(dialog, textvariable=mode_var, values=ACTION_TYPES, state="readonly", width=36)
-        combo.pack(fill="x", padx=14)
-
-        ttk.Label(dialog, text="Value / Path / Text:").pack(anchor="w", padx=14, pady=(12, 4))
-        value_entry = ttk.Entry(dialog, textvariable=value_var, width=40)
-        value_entry.pack(fill="x", padx=14)
-
-        def browse_file():
-            if mode_var.get() == "Launch Application":
-                from tkinter import filedialog
-                filename = filedialog.askopenfilename(
-                    title="Select Application",
-                    filetypes=[("Executables", "*.exe"), ("All Files", "*.*")]
+            if event.name.lower() in {"esc", "escape"}:
+                self._stop_assign()
+                dialog.destroy()
+                return
+            key_id = self._normalize_key(event.name)
+            if key_id:
+                key_var.set(key_id)
+                key_label.config(
+                    text=f"Detected: {self._display_event_key({'name': event.name})}",
+                    foreground="#00aa00",
                 )
-                if filename:
-                    value_var.set(filename)
 
-        browse_frame = ttk.Frame(dialog)
-        browse_frame.pack(fill="x", padx=14, pady=(4, 8))
-        ttk.Button(browse_frame, text="Browse", command=browse_file).pack(side="left")
-
-        help_label = ttk.Label(dialog, text="For shortcuts, use format: ctrl+shift+s", foreground="#9ca3af")
-        help_label.pack(anchor="w", padx=14, pady=(0, 10))
-
-        def record_shortcut():
-            self.record_shortcut(value_var)
-
-        btn_row = ttk.Frame(dialog)
-        btn_row.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Button(btn_row, text="Record Shortcut", command=record_shortcut).pack(side="left", padx=(0, 4))
-        ttk.Button(btn_row, text="Delete", command=lambda: self.delete_key_action(key_id, dialog)).pack(side="left")
-
-        def save_action():
-            selected_label = mode_var.get()
-            code = ACTION_MAP.get(selected_label, "none")
-            preset["keys"][key_id] = {"type": code, "value": value_var.get()}
-            self.save_presets()
-            self.update_key_buttons()
+        def save():
+            if not key_var.get():
+                messagebox.showwarning(APP_NAME, "Please detect a key first")
+                return
+            preset = self.presets.get_current()
+            code = ACTION_MAP.get(func_var.get(), "none")
+            try:
+                delay_ms = max(0, int(delay_var.get() or 0))
+            except ValueError:
+                messagebox.showwarning(APP_NAME, "Delay must be a whole number in milliseconds")
+                return
+            preset["keys"][key_var.get()] = {
+                "type": code,
+                "value": value_var.get(),
+                "name": name_var.get().strip(),
+                "toggle": toggle_var.get(),
+                "double_click": double_click_var.get(),
+                "delay_ms": delay_ms,
+            }
+            self.presets.save()
+            self._stop_assign()
+            self._refresh_keys()
             dialog.destroy()
 
         button_frame = ttk.Frame(dialog)
         button_frame.pack(fill="x", padx=14, pady=8)
-        ttk.Button(button_frame, text="Save", command=save_action).pack(side="left", padx=(0, 4))
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side="left")
+        ttk.Button(button_frame, text="Save", command=save).pack(side="left", padx=(0, 4))
+        ttk.Button(button_frame, text="Cancel", command=lambda: [self._stop_assign(), dialog.destroy()]).pack(side="left")
 
-    def record_shortcut(self, value_var):
-        self.recording_target = value_var
-        self.recording_callback = keyboard.on_press(self._handle_hotkey_record)
-        messagebox.showinfo(APP_NAME, "Press the desired key combination.")
+        self._assigning = False
 
-    def _handle_hotkey_record(self, event):
-        if self.recording_target is None:
-            return
-        if event.name in {"esc", "enter", "space"}:
-            self.cancel_recording()
-            return
-        # keyboard library delivers single-key names. Build a normalized combo.
-        keys = []
-        for item in ["ctrl", "alt", "shift", "win"]:
-            if keyboard.is_pressed(item):
-                keys.append(item)
-        if event.name not in {"ctrl", "alt", "shift", "win"}:
-            keys.append(event.name)
-        combo = "+".join(keys)
-        self.recording_target.set(combo)
-        self.cancel_recording()
+        def on_close():
+            self._stop_assign()
+            dialog.destroy()
 
-    def cancel_recording(self):
-        if self.recording_callback is not None:
-            keyboard.unhook(self.recording_callback)
-            self.recording_callback = None
-        self.recording_target = None
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
 
-    def delete_key_action(self, key_id, dialog):
-        """Delete a key assignment"""
-        preset = self.get_current_preset()
-        if key_id in preset["keys"]:
-            del preset["keys"][key_id]
-            self.save_presets()
-            self.update_key_buttons()
-        dialog.destroy()
+    def _edit_key(self, key_id):
+        """Edit key action"""
+        dialog = Toplevel(self.root)
+        dialog.title(f"Edit - {key_id}")
+        dialog.geometry("460x560")
+        dialog.minsize(460, 560)
+        dialog.transient(self.root)
+        dialog.grab_set()
 
-    def _setup_windows_raw_input(self):
-        if not platform.system().lower() == "windows":
-            self.raw_input_enabled = False
-            self._raw_input_error = "Este filtro de teclado físico só funciona no Windows."
-            return
-        if ctypes is None or wintypes is None:
-            self.raw_input_enabled = False
-            self._raw_input_error = "ctypes não está disponível no ambiente."
-            return
-        self.raw_input_enabled = True
-        self._raw_input_error = None
-        self.available_keyboard_devices = []
-        self.selected_keyboard_handle = None
-        self._raw_input_handle_names = {}
-        self._raw_input_device_name_to_handle = {}
+        preset = self.presets.get_current()
+        action = preset.get("keys", {}).get(key_id, {"type": "none", "value": ""})
 
-    def _enum_raw_input_devices(self):
-        if not self.raw_input_enabled:
-            return []
+        action_type = action.get("type", "none")
+        action_label = self._get_action_label(action_type)
 
-        class RAWINPUTDEVICELIST(ctypes.Structure):
-            _fields_ = [("hDevice", wintypes.HANDLE), ("dwType", wintypes.DWORD)]
+        action_var = StringVar(value=action_label)
+        value_var = StringVar(value=action.get("value", ""))
+        name_var = StringVar(value=action.get("name", ""))
+        selected_key_var = StringVar(value=key_id)
+        toggle_var = BooleanVar(value=bool(action.get("toggle", False)))
+        double_click_var = BooleanVar(value=bool(action.get("double_click", False)))
+        delay_var = StringVar(value=str(action.get("delay_ms", 0)))
 
-        try:
-            num_devices = wintypes.UINT()
-            ctypes.windll.user32.GetRawInputDeviceList(None, ctypes.byref(num_devices), ctypes.sizeof(RAWINPUTDEVICELIST))
-            if num_devices.value == 0:
-                return []
+        ttk.Label(dialog, text="Action:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(14, 4))
+        action_combo = ttk.Combobox(
+            dialog, textvariable=action_var, values=ACTION_TYPES, state="readonly", width=35
+        )
+        action_combo.pack(fill="x", padx=14)
 
-            devices = (RAWINPUTDEVICELIST * num_devices.value)()
-            count = ctypes.windll.user32.GetRawInputDeviceList(
-                ctypes.cast(devices, ctypes.POINTER(RAWINPUTDEVICELIST)),
-                ctypes.byref(num_devices),
-                ctypes.sizeof(RAWINPUTDEVICELIST),
-            )
-            if count == 0 or count == 0xFFFFFFFF:
-                return []
+        ttk.Label(dialog, text="Value:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(12, 4))
+        value_entry = ttk.Entry(dialog, textvariable=value_var)
+        value_entry.pack(fill="x", padx=14)
 
-            result = []
-            for device in devices[:count]:
-                if device.dwType != 0x01:
-                    continue
-                handle = int(device.hDevice)
-                name = self._get_raw_input_device_name(handle)
-                label = name or f"Keyboard-{handle}"
-                result.append({
-                    "handle": str(handle),
-                    "device": label,
-                    "name": label,
-                })
-            return result
-        except Exception as exc:  # pragma: no cover
-            self._raw_input_error = f"Erro ao listar dispositivos Raw Input: {exc}"
-            return []
+        ttk.Label(dialog, text="Key name:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(10, 4))
+        ttk.Entry(dialog, textvariable=name_var).pack(fill="x", padx=14)
+        key_capture_label = ttk.Label(dialog, text=self._display_key_id(key_id), foreground="#666")
+        key_capture_label.pack(anchor="w", padx=14, pady=(6, 0))
+        ttk.Button(
+            dialog,
+            text="Change key",
+            command=lambda: self._begin_key_capture(selected_key_var, key_capture_label),
+        ).pack(anchor="w", padx=14, pady=(2, 0))
 
-    def _get_raw_input_device_name(self, handle):
-        try:
-            device_name = ctypes.create_unicode_buffer(256)
-            size = wintypes.DWORD(256)
-            result = ctypes.windll.user32.GetRawInputDeviceInfoW(
-                handle,
-                0x20000007,
-                device_name,
-                ctypes.byref(size),
-            )
-            if result <= 0:
-                return None
-            return device_name.value.strip()
-        except Exception:
-            return None
+        shortcut_button = ttk.Button(
+            dialog,
+            text="Record shortcut",
+            command=lambda: self._start_shortcut_recording(value_var, shortcut_button),
+        )
+        shortcut_button.pack(anchor="w", padx=14, pady=(6, 0))
 
-    def _get_window_proc_pointer(self, proc):
-        if proc is None:
-            return 0
-        try:
-            return int(ctypes.cast(proc, ctypes.c_void_p).value)
-        except (AttributeError, OverflowError, ValueError):
+        def update_shortcut_controls(_event=None):
+            if action_var.get() == "Keyboard Shortcut":
+                shortcut_button.state(["!disabled"])
+            else:
+                shortcut_button.state(["disabled"])
+
+        action_combo.bind("<<ComboboxSelected>>", update_shortcut_controls)
+        update_shortcut_controls()
+
+        options = ttk.LabelFrame(dialog, text="Activation", padding=8)
+        options.pack(fill="x", padx=14, pady=(12, 4))
+        ttk.Checkbutton(options, text="Toggle", variable=toggle_var).pack(anchor="w")
+        ttk.Checkbutton(options, text="Double click", variable=double_click_var).pack(anchor="w")
+        delay_row = ttk.Frame(options)
+        delay_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(delay_row, text="Delay (ms):").pack(side="left")
+        ttk.Entry(delay_row, textvariable=delay_var, width=10).pack(side="left", padx=(8, 0))
+
+        def browse():
+            f = filedialog.askopenfilename(filetypes=[("Executables", "*.exe"), ("All", "*.*")])
+            if f:
+                value_var.set(f)
+
+        ttk.Button(dialog, text="Browse", command=browse).pack(anchor="w", padx=14, pady=(8, 4))
+
+        def save():
+            code = ACTION_MAP.get(action_var.get(), "none")
             try:
-                return int(proc.handle)
-            except AttributeError:
-                return int(proc)
-
-    def _install_raw_input_hook(self):
-        if not self.raw_input_enabled:
-            return
-        if self._raw_input_hook_installed:
-            return
-
-        try:
-            self._raw_input_devices = []
-
-            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
-            class_name = f"NumpadRawInput_{abs(hash(id(self)))}"
-            self._raw_input_message_class = class_name
-
-            h_instance = ctypes.windll.kernel32.GetModuleHandleW(None)
-
-            class WNDCLASSEXW(ctypes.Structure):
-                _fields_ = [
-                    ("cbSize", wintypes.UINT),
-                    ("style", wintypes.UINT),
-                    ("lpfnWndProc", ctypes.c_void_p),
-                    ("cbClsExtra", ctypes.c_int),
-                    ("cbWndExtra", ctypes.c_int),
-                    ("hInstance", wintypes.HINSTANCE),
-                    ("hIcon", wintypes.HANDLE),
-                    ("hCursor", wintypes.HANDLE),
-                    ("hbrBackground", wintypes.HANDLE),
-                    ("lpszMenuName", wintypes.LPCWSTR),
-                    ("lpszClassName", wintypes.LPCWSTR),
-                    ("hIconSm", wintypes.HANDLE),
-                ]
-
-            wndproc_ptr = WNDPROC(self._raw_input_wnd_proc)
-            wc = WNDCLASSEXW()
-            wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-            wc.style = 0
-            wc.lpfnWndProc = ctypes.cast(wndproc_ptr, ctypes.c_void_p)
-            wc.hInstance = h_instance
-            wc.lpszClassName = class_name
-
-            atom = ctypes.windll.user32.RegisterClassExW(ctypes.byref(wc))
-            if not atom:
-                raise RuntimeError("RegisterClassExW falhou")
-
-            hwnd = ctypes.windll.user32.CreateWindowExW(
-                0,
-                class_name,
-                "",
-                0,
-                0,
-                0,
-                0,
-                0,
-                0xFFFF,
-                None,
-                h_instance,
-                None,
-            )
-            if not hwnd:
-                raise RuntimeError("CreateWindowExW falhou")
-
-            self._raw_input_message_hwnd = hwnd
-
-            class RAWINPUTDEVICE(ctypes.Structure):
-                _fields_ = [
-                    ("usUsagePage", wintypes.USHORT),
-                    ("usUsage", wintypes.USHORT),
-                    ("dwFlags", wintypes.DWORD),
-                    ("hwndTarget", wintypes.HANDLE),
-                ]
-
-            rid = RAWINPUTDEVICE()
-            rid.usUsagePage = 0x01
-            rid.usUsage = 0x06
-            rid.dwFlags = 0x00000100
-            rid.hwndTarget = hwnd
-
-            result = ctypes.windll.user32.RegisterRawInputDevices(
-                ctypes.byref(rid),
-                1,
-                ctypes.sizeof(RAWINPUTDEVICE),
-            )
-            if not result:
-                raise RuntimeError("RegisterRawInputDevices falhou")
-
-            self._raw_input_hook_installed = True
-            self._raw_input_error = None
-            self._raw_input_device_name_to_handle = {
-                device.get("device") or device.get("name") or f"Keyboard-{device.get('handle')}": device.get("handle")
-                for device in self._enum_raw_input_devices()
+                delay_ms = max(0, int(delay_var.get() or 0))
+            except ValueError:
+                messagebox.showwarning(APP_NAME, "Delay must be a whole number in milliseconds")
+                return
+            updated_action = {
+                "type": code,
+                "value": value_var.get(),
+                "name": name_var.get().strip(),
+                "toggle": toggle_var.get(),
+                "double_click": double_click_var.get(),
+                "delay_ms": delay_ms,
             }
-        except Exception as exc:  # pragma: no cover
-            self.raw_input_enabled = False
-            self._raw_input_error = f"Falha ao registrar Raw Input: {exc}"
-            self._raw_input_hook_installed = False
-
-    def _raw_input_wnd_proc(self, hwnd, msg, wparam, lparam):
-        if msg == 0x00FF:
-            if lparam is not None:
-                self._handle_raw_input_message(lparam)
-            return 0
-        return 0
-
-    def _handle_raw_input_message(self, lparam):
-        try:
-            class RAWINPUTHEADER(ctypes.Structure):
-                _fields_ = [
-                    ("dwType", wintypes.DWORD),
-                    ("dwSize", wintypes.DWORD),
-                    ("hDevice", wintypes.HANDLE),
-                    ("wParam", wintypes.DWORD),
-                ]
-
-            class RAWKEYBOARD(ctypes.Structure):
-                _fields_ = [
-                    ("MakeCode", wintypes.USHORT),
-                    ("Flags", wintypes.USHORT),
-                    ("Reserved", wintypes.USHORT),
-                    ("VKey", wintypes.USHORT),
-                    ("Message", wintypes.UINT),
-                    ("ExtraInformation", wintypes.ULONG),
-                ]
-
-            class RAWINPUTUNION(ctypes.Union):
-                _fields_ = [("keyboard", RAWKEYBOARD)]
-
-            class RAWINPUT(ctypes.Structure):
-                _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUTUNION)]
-
-            size = wintypes.UINT(ctypes.sizeof(RAWINPUT))
-            buffer = (ctypes.c_byte * size.value)()
-            result = ctypes.windll.user32.GetRawInputData(
-                ctypes.c_void_p(lparam),
-                0x10000003,
-                buffer,
-                ctypes.byref(size),
-                ctypes.sizeof(RAWINPUTHEADER),
-            )
-            if result == 0xFFFFFFFF or not buffer:
+            new_key_id = selected_key_var.get().strip()
+            if not new_key_id:
+                messagebox.showwarning(APP_NAME, "Press a key before saving")
                 return
+            if new_key_id != key_id:
+                preset["keys"].pop(key_id, None)
+            preset["keys"][new_key_id] = updated_action
+            self.presets.save()
+            self._stop_assign()
+            self._stop_shortcut_recording()
+            self._refresh_keys()
+            dialog.destroy()
 
-            raw = ctypes.cast(buffer, ctypes.POINTER(RAWINPUT)).contents
-            if raw.header.dwType != 0x01:
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill="x", padx=14, pady=8)
+        ttk.Button(button_frame, text="Save", command=save).pack(side="left", padx=(0, 4))
+        ttk.Button(
+            button_frame,
+            text="Cancel",
+            command=lambda: (self._stop_shortcut_recording(), dialog.destroy()),
+        ).pack(side="left")
+
+    def _start_shortcut_recording(self, value_var, button):
+        """Capture a key combination such as alt+left."""
+        self._stop_shortcut_recording()
+        pressed = []
+        captured = []
+        button.configure(text="Press shortcut...")
+
+        def on_event(event):
+            name = self._normalize_shortcut_key(event.name)
+            if not name:
                 return
+            if event.event_type == "down" and name not in pressed:
+                pressed.append(name)
+                if name not in captured:
+                    captured.append(name)
+            elif event.event_type == "up" and name in pressed:
+                pressed.remove(name)
+                if not pressed and captured:
+                    shortcut = keyboard.get_hotkey_name(captured).replace(" + ", "+")
+                    self.root.after(0, lambda: value_var.set(shortcut))
+                    self._stop_shortcut_recording()
+                    self.root.after(0, lambda: button.configure(text="Record shortcut"))
 
-            device_handle = str(int(raw.header.hDevice))
-            device_name = self._get_raw_input_device_name(raw.header.hDevice)
-            if not device_name:
-                device_name = f"Keyboard-{device_handle}"
+        self.shortcut_recording_callback = keyboard.hook(on_event)
 
-            if self.selected_keyboard_handle is None:
-                self.selected_keyboard_handle = device_name
+    def _stop_shortcut_recording(self):
+        callback = getattr(self, "shortcut_recording_callback", None)
+        if callback:
+            keyboard.unhook(callback)
+            self.shortcut_recording_callback = None
 
-            if not self.keyboard_device_id:
-                self._process_raw_input_key(raw.data.keyboard.VKey, device_name)
+    def _begin_key_capture(self, key_var, key_label, button=None):
+        """Capture a physical key for a new or existing assignment."""
+        self._stop_assign()
+        self._assigning = True
+        self._assignment_key_var = key_var
+        self._assignment_key_label = key_label
+        if button is not None:
+            button.focus_set()
+            button.configure(text="Press a key...")
+
+        if self.native_helper.exists():
+            key_label.config(text="Press a key...", foreground="#0066cc")
+            return
+
+        def on_key(event):
+            if not self._assigning:
                 return
+            key_id = self._normalize_key(event.name)
+            if key_id:
+                key_var.set(key_id)
+                key_label.config(
+                    text=f"Detected: {self._display_event_key({'name': event.name})}",
+                    foreground="#00aa00",
+                )
+                self._stop_assign()
+                if button is not None:
+                    button.configure(text="Assign key")
 
-            selected = self.normalize_device_id(self.keyboard_device_id)
-            current = self.normalize_device_id(device_name)
-            if selected and (current == selected or selected in current or current in selected):
-                self._process_raw_input_key(raw.data.keyboard.VKey, device_name)
-        except Exception:
+        self.recording_callback = keyboard.on_press(on_key)
+
+    def _delete_key(self, key_id):
+        """Delete key"""
+        if messagebox.askyesno(APP_NAME, f"Delete '{key_id}'?"):
+            preset = self.presets.get_current()
+            if key_id in preset.get("keys", {}):
+                del preset["keys"][key_id]
+                self.presets.save()
+                self._refresh_keys()
+
+    def _set_action(self, key_id, action_label):
+        """Set action for key"""
+        code = ACTION_MAP.get(action_label, "none")
+        preset = self.presets.get_current()
+        action = preset["keys"].get(key_id, {})
+        action["type"] = code
+        action.setdefault("value", "")
+        preset["keys"][key_id] = action
+        self.presets.save()
+
+    def _switch_preset(self):
+        """Switch preset"""
+        name = self.preset_var.get()
+        self.presets.switch(name)
+        self._refresh_keys()
+
+    def _listen_keys(self):
+        """Listen for key presses"""
+
+        if self.native_helper.exists():
+            self._start_native_listener()
             return
 
-    def _process_raw_input_key(self, vk_code, device_name=None):
-        if not self.enabled:
+        def handler(event):
+            if not self.enabled:
+                return
+            if self.device_test_active:
+                self.device_test_status_var.set(
+                    f"Keyboard {getattr(event, 'device', 'unknown')} : {self._normalize_key(event.name)}"
+                )
+                return
+            key_id = self._normalize_key(event.name)
+            preset = self.presets.get_current()
+            action = preset.get("keys", {}).get(key_id)
+            if action:
+                self._process_key_press(key_id, action)
+
+        threading.Thread(target=lambda: keyboard.on_press(handler), daemon=True).start()
+
+    def _refresh_keyboard_devices(self):
+        """Load physical keyboards from the Raw Input helper."""
+        if not self.native_helper.exists():
+            self.keyboard_device_combo["values"] = ["All keyboards (native helper unavailable)"]
+            self.keyboard_device_var.set("All keyboards (native helper unavailable)")
+            self.keyboard_full_id_var.set("Native helper unavailable")
             return
-
-        key_name = self._vk_to_key_name(vk_code)
-        if not key_name:
-            return
-
-        if self.device_test_active:
-            self._flash_device_test(key_name)
-            return
-
-        if not self.keyboard_device_id:
-            return
-
-        selected = self.normalize_device_id(self.keyboard_device_id)
-        current = self.normalize_device_id(device_name)
-        if not selected:
-            return
-        if not current:
-            return
-        if not (current == selected or selected in current or current in selected):
-            return
-
-        key_id = self._normalize_key_id(key_name)
-        if key_id in self.key_buttons:
-            self.execute_action(key_id)
-
-    def _normalize_key_id(self, key_name):
-        normalized = (key_name or "").strip().lower()
-        alias_map = {
-            "kp0": "0",
-            "kp1": "1",
-            "kp2": "2",
-            "kp3": "3",
-            "kp4": "4",
-            "kp5": "5",
-            "kp6": "6",
-            "kp7": "7",
-            "kp8": "8",
-            "kp9": "9",
-            "numlock": "numlock",
-            "slash": "/",
-            "*": "*",
-            "minus": "-",
-            "backspace": "backspace",
-            "del": "del",
-            "enter": "enter",
-            "return": "enter",
-        }
-        return alias_map.get(normalized, normalized)
-
-    def _vk_to_key_name(self, vk_code):
-        key_map = {
-            0x08: "backspace",
-            0x09: "tab",
-            0x0D: "enter",
-            0x10: "shift",
-            0x11: "ctrl",
-            0x12: "alt",
-            0x14: "caps lock",
-            0x20: "space",
-            0x2E: "del",
-            0x30: "0",
-            0x31: "1",
-            0x32: "2",
-            0x33: "3",
-            0x34: "4",
-            0x35: "5",
-            0x36: "6",
-            0x37: "7",
-            0x38: "8",
-            0x39: "9",
-            0x41: "a",
-            0x42: "b",
-            0x43: "c",
-            0x44: "d",
-            0x45: "e",
-            0x46: "f",
-            0x47: "g",
-            0x48: "h",
-            0x49: "i",
-            0x4A: "j",
-            0x4B: "k",
-            0x4C: "l",
-            0x4D: "m",
-            0x4E: "n",
-            0x4F: "o",
-            0x50: "p",
-            0x51: "q",
-            0x52: "r",
-            0x53: "s",
-            0x54: "t",
-            0x55: "u",
-            0x56: "v",
-            0x57: "w",
-            0x58: "x",
-            0x59: "y",
-            0x5A: "z",
-            0x6A: "*",
-            0x6B: "+",
-            0x6D: "-",
-            0x6E: ".",
-            0x6F: "/",
-            0x60: "0",
-            0x61: "1",
-            0x62: "2",
-            0x63: "3",
-            0x64: "4",
-            0x65: "5",
-            0x66: "6",
-            0x67: "7",
-            0x68: "8",
-            0x69: "9",
-            0x6C: "/",
-            0x6D: "-",
-            0x6E: ".",
-            0x6F: "/",
-        }
-        return key_map.get(vk_code, None)
-
-    def _device_label(self, device):
-        if isinstance(device, dict):
-            handle = str(device.get("handle") or device.get("id") or "").strip()
-            if handle:
-                return f"Keyboard-{handle}"
-            name = device.get("name") or device.get("device") or "Teclado"
-            return str(name)
-        return str(device)
-
-    def _native_raw_input_devices(self):
-        if not self.native_raw_input_available:
-            return []
 
         try:
-            completed = subprocess.run(
-                [str(self.native_raw_input_helper), "--list"],
+            result = subprocess.run(
+                [str(self.native_helper), "--list"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,
                 check=False,
             )
-            if completed.returncode != 0:
-                return []
+        except (OSError, subprocess.SubprocessError):
+            result = None
 
-            devices = []
-            for line in completed.stdout.splitlines():
-                line = line.strip()
-                if not line or "[" not in line or "handle=" not in line:
+        devices = []
+        if result and result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "handle=" not in line:
                     continue
-                left = line.split("handle=", 1)[1]
-                handle = left.split(" name=", 1)[0].strip()
-                name = left.split(" name=", 1)[1].strip() if " name=" in left else handle
-                devices.append({"handle": handle, "device": name, "name": name})
-            return devices
-        except Exception:
-            return []
+                handle = line.split("handle=", 1)[1].split(" name=", 1)[0].strip()
+                name = line.split(" name=", 1)[1].strip() if " name=" in line else handle
+                devices.append((handle, name))
 
-    def _parse_native_event_line(self, line):
-        if not line or not str(line).strip():
-            return None
-        try:
-            payload = json.loads(line)
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        payload["device"] = str(payload.get("device") or payload.get("name") or "")
-        payload["handle"] = str(payload.get("handle") or "")
-        payload["name"] = str(payload.get("name") or payload.get("key") or "")
-        payload["pressed"] = bool(payload.get("pressed", True))
-        try:
-            payload["vk"] = int(payload.get("vk", 0))
-        except Exception:
-            payload["vk"] = 0
-        return payload
+        self.available_keyboard_devices = devices
+        labels = ["All keyboards"] + [self._keyboard_label(handle, name) for handle, name in devices]
+        self.keyboard_device_combo["values"] = labels
+        current = next(
+            (self._keyboard_label(handle, name) for handle, name in devices if handle == self.keyboard_device_id),
+            None,
+        )
+        self.keyboard_device_var.set(current or "All keyboards")
+        self.keyboard_full_id_var.set(self.keyboard_device_id or "No keyboard selected")
 
-    def _native_event_matches_selected_device(self, event):
-        if self.keyboard_device_id in {"", None}:
-            return True
+    def _keyboard_label(self, handle, system_name):
+        custom_name = self.presets.keyboard_names.get(handle, system_name)
+        return f"Keyboard {handle[:5]} : {custom_name}"
 
-        if not isinstance(event, dict):
-            return True
+    def _rename_keyboard(self):
+        handle = self.keyboard_device_id
+        if not handle:
+            messagebox.showwarning(APP_NAME, "Select a keyboard first")
+            return
+        current = next((name for item_handle, name in self.available_keyboard_devices if item_handle == handle), "")
+        name = simpledialog.askstring(
+            APP_NAME,
+            "Keyboard name:",
+            initialvalue=self.presets.keyboard_names.get(handle, current),
+            parent=self.root,
+        )
+        if name and name.strip():
+            self.presets.keyboard_names[handle] = name.strip()
+            self.presets.save()
+            self._refresh_keyboard_devices()
 
-        selected = self.normalize_device_id(self.keyboard_device_id)
-        event_handle = self.normalize_device_id(event.get("handle") or event.get("device") or "")
-        event_device = self.normalize_device_id(event.get("device") or "")
+    def _select_keyboard_device(self, _event=None):
+        """Set the selected physical keyboard used by the native listener."""
+        selected = self.keyboard_device_var.get()
+        self.keyboard_device_id = next(
+            (
+                handle
+                for handle, name in self.available_keyboard_devices
+                if self._keyboard_label(handle, name) == selected
+            ),
+            "",
+        )
+        self.keyboard_full_id_var.set(self.keyboard_device_id or "No keyboard selected")
 
-        return (
-            selected == event_handle
-            or selected == event_device
-            or selected in event_handle
-            or selected in event_device
+    def _toggle_keyboard_test(self):
+        self.device_test_active = not self.device_test_active
+        self.device_test_status_var.set(
+            "Press a key on the keyboard to identify it..." if self.device_test_active else ""
+        )
+        self.device_test_button.configure(
+            text="Stop keyboard test" if self.device_test_active else "Test keyboard"
         )
 
-    def _start_native_bridge(self):
-        if not self.native_raw_input_available or self.native_bridge_running:
-            return
+    def _show_keyboard_test_event(self, event):
+        handle = str(event.get("handle") or event.get("device") or "unknown")
+        key = self._normalize_key(event.get("name"))
+        self.device_test_status_var.set(f"Keyboard {handle[:5]} : {handle} : {key}")
 
+    def _start_native_listener(self):
+        """Read Raw Input events from the helper."""
         try:
-            self.native_bridge_process = subprocess.Popen(
-                [str(self.native_raw_input_helper), "--listen"],
+            self.native_process = subprocess.Popen(
+                [str(self.native_helper), "--listen"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
-                creationflags=0,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            self.native_bridge_running = True
+        except OSError as error:
+            print(f"Unable to start keyboard filter: {error}")
+            self.native_process = None
+            return
 
-            def reader():
-                if self.native_bridge_process is None or self.native_bridge_process.stdout is None:
-                    return
-                for raw_line in self.native_bridge_process.stdout:
-                    payload = self._parse_native_event_line(raw_line)
-                    if payload is None or not payload.get("pressed"):
-                        continue
-                    if not self._native_event_matches_selected_device(payload):
-                        continue
-                    vk_code = int(payload.get("vk", 0) or 0)
-                    event_name = (payload.get("name") or "").lower()
-                    key_id = self._vk_to_key_name(vk_code) or event_name
-                    if self.device_test_active:
-                        self.root.after(0, lambda _name=key_id: self._flash_device_test(_name))
-                        continue
-                    if key_id in self.key_buttons:
-                        self.root.after(0, lambda _key_id=key_id: self.execute_action(_key_id))
+        def read_events():
+            if not self.native_process or not self.native_process.stdout:
+                return
+            for line in self.native_process.stdout:
+                event = self._parse_native_event_line(line)
+                if not event or not event.get("pressed"):
+                    continue
+                if not self._native_event_matches_selected_device(event):
+                    continue
+                if getattr(self, "_assigning", False):
+                    self.root.after(0, lambda item=event: self._capture_native_key(item))
+                    continue
+                if self.device_test_active:
+                    self.root.after(0, lambda item=event: self._show_keyboard_test_event(item))
+                    continue
+                key_id = self._normalize_key(event.get("name"))
+                event_id = self._event_key_id(event)
+                action = self.presets.get_current().get("keys", {}).get(
+                    event_id,
+                    self.presets.get_current().get("keys", {}).get(key_id),
+                )
+                if action:
+                    self.root.after(
+                        0,
+                        lambda item_key=event_id, item=action: self._process_key_press(item_key, item),
+                    )
 
-            self.native_bridge_reader = threading.Thread(target=reader, daemon=True)
-            self.native_bridge_reader.start()
-        except Exception as exc:  # pragma: no cover
-            self._raw_input_error = f"Falha ao iniciar raw input nativo: {exc}"
-            self.native_bridge_running = False
-            self.native_bridge_process = None
+        self.native_reader = threading.Thread(target=read_events, daemon=True)
+        self.native_reader.start()
 
-    def _stop_native_bridge(self):
-        if self.native_bridge_process is not None:
-            try:
-                self.native_bridge_process.terminate()
-                self.native_bridge_process.wait(timeout=2)
-            except Exception:
+    def _stop_native_listener(self):
+        """Stop the Raw Input helper when the application exits."""
+        if self.native_process:
+            self.native_process.terminate()
+            self.native_process = None
+
+    def _process_key_press(self, key_id, action):
+        """Apply activation options before executing a configured action."""
+        if not self.enabled:
+            return
+
+        now = time.monotonic()
+        if action.get("double_click", False):
+            previous = self.last_press_times.get(key_id, 0)
+            self.last_press_times[key_id] = now
+            if now - previous > 0.4:
+                return
+
+        if action.get("toggle", False):
+            self.toggle_states[key_id] = not self.toggle_states.get(key_id, False)
+            if not self.toggle_states[key_id]:
+                return
+
+        try:
+            delay_ms = max(0, int(action.get("delay_ms", 0) or 0))
+        except (TypeError, ValueError):
+            delay_ms = 0
+        if delay_ms:
+            self.root.after(delay_ms, lambda: self._execute_action(action))
+        else:
+            self._execute_action(action)
+
+    def _execute_action(self, action):
+        """Execute action"""
+        action_type = action.get("type", "none")
+        value = action.get("value", "")
+
+        try:
+            if action_type == "none":
                 pass
-        self.native_bridge_process = None
-        self.native_bridge_reader = None
-        self.native_bridge_running = False
+            elif action_type == "close_window":
+                self.root.destroy()
+            elif action_type == "open_site":
+                webbrowser.open(value)
+            elif action_type == "open_program":
+                if value:
+                    subprocess.Popen(value)
+            elif action_type == "open_folder":
+                if value:
+                    os.startfile(value)
+            elif action_type == "hotkey":
+                if value:
+                    keyboard.press_and_release(value)
+            elif action_type == "play_pause":
+                keyboard.send("play/pause")
+            elif action_type == "prev_track":
+                keyboard.send("media_prev")
+            elif action_type == "next_track":
+                keyboard.send("media_next")
+            elif action_type == "volume_up":
+                keyboard.send("volume_up")
+            elif action_type == "volume_down":
+                keyboard.send("volume_down")
+            elif action_type == "mute":
+                keyboard.send("volume_mute")
+            elif action_type == "windows_tab":
+                keyboard.send("win+tab")
+            elif action_type == "alt_tab":
+                keyboard.send("alt+tab")
+            elif action_type == "write_text":
+                if value:
+                    keyboard.write(value)
+                    keyboard.press_and_release("enter")
+            elif action_type == "lock_pc":
+                ctypes.windll.user32.LockWorkStation()
+            elif action_type == "screenshot":
+                from PIL import ImageGrab
+                screenshot = ImageGrab.grab()
+                desktop = Path.home() / "Desktop"
+                desktop.mkdir(exist_ok=True)
+                screenshot.save(desktop / f"screenshot_{int(time.time())}.png")
+        except Exception as e:
+            print(f"Error executing action: {e}")
 
-    def refresh_keyboard_devices(self):
-        if not hasattr(self, "keyboard_device_combo"):
-            return
-
-        if self.native_raw_input_available:
-            devices = self._native_raw_input_devices()
-            if devices:
-                self.available_keyboard_devices = devices
-                labels = [self._device_label(device) for device in devices]
-                values = ["All keyboards"] + labels
-                self.keyboard_device_combo["values"] = values
-                if hasattr(self, "keyboard_device_combo_presets"):
-                    self.keyboard_device_combo_presets["values"] = values
-                if not self.keyboard_device_id:
-                    self.keyboard_device_var.set("All keyboards")
-                    self.keyboard_device_id = ""
-                    return
-                for device in devices:
-                    if str(device.get("handle") or "") == str(self.keyboard_device_id):
-                        self.keyboard_device_var.set(self._device_label(device))
-                        return
-                self.keyboard_device_var.set("All keyboards")
-                self.keyboard_device_id = ""
-                return
-
-        if not self.raw_input_enabled:
-            self.available_keyboard_devices = []
-            self.keyboard_device_combo["values"] = []
-            if hasattr(self, "keyboard_device_combo_presets"):
-                self.keyboard_device_combo_presets["values"] = []
-            self.keyboard_device_var.set("")
-            self.keyboard_device_id = ""
-            return
-
-        devices = self._enum_raw_input_devices()
-        if not devices:
-            self.available_keyboard_devices = []
-            values = ["All keyboards"]
-            self.keyboard_device_combo["values"] = values
-            if hasattr(self, "keyboard_device_combo_presets"):
-                self.keyboard_device_combo_presets["values"] = values
-            self.keyboard_device_var.set("All keyboards")
-            self.keyboard_device_id = ""
-            return
-
-        self.available_keyboard_devices = devices
-        labels = [self._device_label(device) for device in devices]
-        values = ["All keyboards"] + labels
-        self.keyboard_device_combo["values"] = values
-        if hasattr(self, "keyboard_device_combo_presets"):
-            self.keyboard_device_combo_presets["values"] = values
-
-        if not self.keyboard_device_id:
-            self.keyboard_device_var.set("All keyboards")
-            self.keyboard_device_id = ""
-            return
-
-        for device in devices:
-            if str(device.get("handle") or "") == str(self.keyboard_device_id):
-                self.keyboard_device_var.set(self._device_label(device))
-                return
-        self.keyboard_device_var.set("All keyboards")
-        self.keyboard_device_id = ""
+    def _toggle_enabled(self):
+        """Toggle enabled state"""
+        self.enabled = not self.enabled
+        self.disable_streamdeck_var.set(not self.enabled)
+        self._toggle_status_display()
+        self._save_preferences()
 
     def normalize_device_id(self, value):
-        if value is None:
-            return ""
-        value = str(value).strip().lower()
-        if value in {"all keyboards", "all", ""}:
-            return ""
-        return value
+        """Normalize device identifiers before comparing them."""
+        return str(value or "").strip().lower()
 
     def can_test_selected_keyboard(self):
-        return bool(self.keyboard_device_id and self.normalize_device_id(self.keyboard_device_id))
+        """Return whether a concrete keyboard has been selected."""
+        return bool(self.normalize_device_id(getattr(self, "keyboard_device_id", "")))
 
-    def toggle_device_test_mode(self):
-        if not self.can_test_selected_keyboard():
-            self.device_test_status_var.set("Selecione um teclado antes de testar.")
-            self.device_test_led.configure(foreground="#cbd5e1")
-            return
-
-        self.device_test_active = not self.device_test_active
-        if self.device_test_active:
-            self.device_test_status_var.set(f"Teste ativo: {self.keyboard_device_id}")
-            self.device_test_led.configure(foreground="#f59e0b")
-            self.device_test_button.configure(text="Parar teste")
-        else:
-            self.device_test_status_var.set("Teste parado.")
-            self.device_test_led.configure(foreground="#cbd5e1")
-            self.device_test_button.configure(text="Testar dispositivo")
-
-    def _flash_device_test(self, key_name=None):
-        if not self.device_test_active:
-            return
-        self.device_test_status_var.set(f"Tecla detectada: {key_name or 'qualquer'}")
-        self.device_test_led.configure(foreground="#22c55e")
-        self.root.after(220, lambda: self.device_test_led.configure(foreground="#f59e0b"))
-
-    def apply_keyboard_device_filter(self):
-        value = self.keyboard_device_var.get().strip()
-        if value in {"", "All keyboards"}:
-            self.keyboard_device_id = ""
-            self.keyboard_device_var.set("All keyboards")
-            self.device_test_active = False
-            if hasattr(self, "device_test_button") and self.device_test_button.winfo_exists():
-                self.device_test_button.configure(text="Testar dispositivo")
-                self.device_test_button.state(["disabled"])
-            if hasattr(self, "device_test_status_var"):
-                self.device_test_status_var.set("Aguardando teste...")
-            if hasattr(self, "device_test_led") and self.device_test_led.winfo_exists():
-                self.device_test_led.configure(foreground="#cbd5e1")
-            return ""
-
-        device_handle = ""
-        for device in self.available_keyboard_devices:
-            if self._device_label(device) == value:
-                device_handle = str(device.get("handle") or "")
-                break
-
-        if not device_handle:
-            device_handle = value
-
-        self.keyboard_device_id = device_handle
-        self.selected_keyboard_handle = device_handle
-        if hasattr(self, "device_test_button") and self.device_test_button.winfo_exists():
-            self.device_test_button.state(["!disabled"])
-        if hasattr(self, "device_test_status_var"):
-            self.device_test_status_var.set(f"Teclado selecionado: {self._device_label({'handle': device_handle, 'name': device_handle})}")
-        return device_handle
-
-    def clear_keyboard_device_filter(self):
-        self.keyboard_device_id = ""
-        self.selected_keyboard_handle = None
-        self.keyboard_device_var.set("All keyboards")
+    def _get_window_proc_pointer(self, callback):
+        """Convert a ctypes callback to a stable native pointer value."""
+        pointer = ctypes.cast(callback, ctypes.c_void_p).value
+        if pointer is None:
+            raise ValueError("Unable to obtain window procedure pointer")
+        return int(pointer)
 
     def should_process_keyboard_event(self, event):
+        """Return whether an event belongs to the selected keyboard."""
         if not getattr(self, "enabled", True):
             return False
 
@@ -1464,210 +1028,161 @@ class NumpadStreamDeckApp:
             event_device = getattr(event, "device", None)
 
         selected_device = self.normalize_device_id(getattr(self, "keyboard_device_id", ""))
-
-        if getattr(self, "device_test_active", False):
-            if not selected_device:
-                return True
-            if event_device is None:
-                return True
-            current_device = self.normalize_device_id(event_device)
-            return current_device == selected_device or selected_device in current_device or current_device in selected_device
-
         if not selected_device:
             return True
-
         if event_device is None:
-            return False
+            return getattr(self, "device_test_active", False)
 
         current_device = self.normalize_device_id(event_device)
-        if not current_device or not selected_device:
-            return False
+        return (
+            current_device == selected_device
+            or selected_device in current_device
+            or current_device in selected_device
+        )
 
-        return current_device == selected_device or selected_device in current_device or current_device in selected_device
+    def _parse_native_event_line(self, line):
+        """Parse and normalize one event emitted by the native helper."""
+        if not line or not str(line).strip():
+            return None
+        try:
+            payload = json.loads(line)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
 
-    def update_status_display(self):
-        text = "Enabled" if self.enabled else "Disabled"
-        self.status_var.set(text)
-        self.status_label.configure(foreground="#16a34a" if self.enabled else "#d97706")
+        payload["device"] = str(payload.get("device") or payload.get("name") or "")
+        payload["handle"] = str(payload.get("handle") or "")
+        payload["name"] = str(payload.get("name") or payload.get("key") or "")
+        payload["pressed"] = bool(payload.get("pressed", True))
+        try:
+            payload["vk"] = int(payload.get("vk", 0))
+        except (TypeError, ValueError):
+            payload["vk"] = 0
+        return payload
 
-    def toggle_enabled(self):
-        self.enabled = not self.enabled
-        self.update_status_display()
-        self.root.update_idletasks()
+    def _native_event_matches_selected_device(self, event):
+        """Match native events using either the handle or display name."""
+        selected_device = self.normalize_device_id(getattr(self, "keyboard_device_id", ""))
+        if not selected_device or not isinstance(event, dict):
+            return True
+
+        event_handle = self.normalize_device_id(event.get("handle"))
+        event_device = self.normalize_device_id(event.get("device"))
+        return any(
+            selected_device == candidate
+            or selected_device in candidate
+            or candidate in selected_device
+            for candidate in (event_handle, event_device)
+            if candidate
+        )
+
+    def _setup_hotkeys(self):
+        """Setup global hotkeys"""
+        keyboard.add_hotkey("ctrl+alt+f12", self._toggle_enabled)
+
+    def _create_tray(self):
+        """Create tray icon"""
+        image = Image.new("RGBA", (64, 64), (30, 30, 40, 255))
+        self.tray = pystray.Icon(APP_NAME, image, APP_NAME, menu=pystray.Menu(
+            pystray.MenuItem("Open", lambda: self.root.deiconify()),
+            pystray.MenuItem("Exit", self._exit_app),
+        ))
+        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def _exit_app(self):
+        """Close the app and its native input helper."""
+        self._stop_shortcut_recording()
+        self._stop_native_listener()
+        self.root.after(0, self.root.destroy)
+
+    def _stop_assign(self):
+        """Stop key assignment"""
+        self._assigning = False
+        if self.recording_callback:
+            keyboard.unhook(self.recording_callback)
+            self.recording_callback = None
+
+    def _normalize_key(self, name):
+        """Normalize key name"""
+        aliases = {
+            "kp0": "0", "kp1": "1", "kp2": "2", "kp3": "3", "kp4": "4",
+            "kp5": "5", "kp6": "6", "kp7": "7", "kp8": "8", "kp9": "9",
+        }
+        normalized = (name or "").lower().strip()
+        return aliases.get(normalized, normalized)
+
+    def _normalize_shortcut_key(self, name):
+        """Normalize names emitted while recording a shortcut."""
+        aliases = {
+            "left alt": "alt",
+            "right alt": "alt gr",
+            "left ctrl": "ctrl",
+            "right ctrl": "ctrl",
+            "left shift": "shift",
+            "right shift": "shift",
+            "left windows": "win",
+            "right windows": "win",
+        }
+        return aliases.get((name or "").lower().strip(), (name or "").lower().strip())
+
+    def _event_key_id(self, event):
+        """Build a stable key identifier that includes the physical device."""
+        handle = self.normalize_device_id(event.get("handle") or event.get("device"))
+        key = self._normalize_key(event.get("name"))
+        return f"{handle}::{key}" if handle else key
+
+    def _display_key_id(self, key_id, custom_name=""):
+        """Format internal device/key identifiers for the key list."""
+        if "::" not in key_id:
+            return f"key {key_id} : {custom_name}" if custom_name else f"key {key_id}"
+        device, key = key_id.split("::", 1)
+        label = f"key {key}"
+        return f"{label} : {custom_name}" if custom_name else f"{label} ({device[:5]})"
+
+    def _display_event_key(self, event):
+        """Format a captured event with its device and key information."""
+        handle = self.normalize_device_id(event.get("handle"))
+        key = self._normalize_key(event.get("name"))
+        system_name = next(
+            (name for item_handle, name in self.available_keyboard_devices if item_handle == handle),
+            handle or "Unknown keyboard",
+        )
+        device_name = self.presets.keyboard_names.get(handle, system_name)
+        key_number = event.get("vk") or key
+        return f"{device_name} : key {key_number} : {key}"
+
+    def _capture_native_key(self, event):
+        """Show the complete physical device and key during assignment."""
+        if not getattr(self, "_assigning", False):
+            return
+        key_id = self._event_key_id(event)
+        self._assignment_key_var.set(key_id)
+        self._assignment_key_label.config(
+            text=f"Detected: {self._display_event_key(event)}", foreground="#00aa00"
+        )
+        self._stop_assign()
+
+    def _get_action_label(self, action_type):
+        """Get action label from type"""
+        for label, code in ACTION_MAP.items():
+            if code == action_type:
+                return label
+        return "None"
 
     def hide_window(self):
-        self.root.withdraw()
-        if self.tray_icon is not None:
-            self.tray_icon.visible = True
-
-    def show_window(self):
-        self.root.deiconify()
-        self.root.focus_force()
-
-    def create_tray_icon(self):
-        image = self.make_tray_image()
-        menu = (
-            pystray.MenuItem("Open", self.show_window),
-            pystray.MenuItem("Switch Preset", self.rotate_preset),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Exit", self.exit_app),
-        )
-        self.tray_icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
-        threading.Thread(target=self.tray_icon.run, daemon=True).start()
-
-    def make_tray_image(self):
-        size = (64, 64)
-        image = Image.new("RGBA", size, (17, 24, 39, 255))
-        # dark rounded square
-        for x in range(8, 56):
-            for y in range(8, 56):
-                if 8 <= x <= 56 and 8 <= y <= 56:
-                    image.putpixel((x, y), (31, 41, 55, 255))
-        # accent mark
-        for x in range(18, 46):
-            for y in range(18, 46):
-                if x in range(21, 41) and y in range(21, 41):
-                    image.putpixel((x, y), (61, 214, 141, 255))
-        return image
-
-    def rotate_preset(self):
-        keys = list(self.presets.keys())
-        if not keys:
-            return
-        current_index = keys.index(self.current_preset_name)
-        next_index = (current_index + 1) % len(keys)
-        self.switch_preset(keys[next_index])
-
-    def exit_app(self):
-        try:
-            if self.tray_icon is not None:
-                self.tray_icon.stop()
-        except Exception:
-            pass
-        self.root.destroy()
-
-    def setup_global_hotkeys(self):
-        keyboard.add_hotkey("ctrl+alt+f12", self.toggle_enabled)
-        keyboard.add_hotkey("ctrl+alt+1", lambda: self.switch_preset("Default"))
-        keyboard.add_hotkey("ctrl+alt+2", lambda: self.switch_preset("Default"))
-        keyboard.add_hotkey("ctrl+alt+3", lambda: self.switch_preset("Default"))
-
-    def setup_raw_input_listener(self):
-        if self.native_raw_input_available:
-            self.raw_input_enabled = True
-            self._raw_input_error = None
-            self._raw_input_hook_installed = True
-            self._start_native_bridge()
-            self.refresh_keyboard_devices()
-            return
-        if not self.raw_input_enabled:
-            return
-        if not hasattr(self, "keyboard_device_combo"):
-            return
-        self._install_raw_input_hook()
-        self.refresh_keyboard_devices()
-
-    def execute_action(self, key_id):
-        if not self.enabled:
-            return
-        preset = self.get_current_preset()
-        action = preset["keys"].get(key_id, {"type": "none", "value": ""})
-        action_type = action.get("type", "none")
-        value = safe_text(action.get("value", ""))
-
-        if action_type == "none":
-            return
-        elif action_type == "close_window":
+        """Hide window to tray"""
+        if self.minimize_on_close_var.get():
+            self.root.withdraw()
+        else:
+            self._stop_shortcut_recording()
+            self._stop_native_listener()
             self.root.destroy()
-        elif action_type == "open_site":
-            webbrowser.open(value)
-        elif action_type == "open_program":
-            if value:
-                subprocess.Popen(value)
-        elif action_type == "open_folder":
-            if value:
-                os.startfile(value)
-        elif action_type == "hotkey":
-            if value:
-                keyboard.press_and_release(value)
-        elif action_type == "play_pause":
-            keyboard.send("play/pause")
-        elif action_type == "prev_track":
-            keyboard.send("media_prev")
-        elif action_type == "next_track":
-            keyboard.send("media_next")
-        elif action_type == "volume_up":
-            keyboard.send("volume_up")
-        elif action_type == "volume_down":
-            keyboard.send("volume_down")
-        elif action_type == "mute":
-            keyboard.send("volume_mute")
-        elif action_type == "desktop":
-            os.system("explorer.exe shell:desktop")
-        elif action_type == "windows_tab":
-            keyboard.send("win+tab")
-        elif action_type == "alt_tab":
-            keyboard.send("alt+tab")
-        elif action_type == "write_text":
-            if value:
-                keyboard.write(value)
-                keyboard.press_and_release("enter")
-        elif action_type == "lock_pc":
-            ctypes.windll.user32.LockWorkStation()
-        elif action_type == "screenshot":
-            screenshot = ImageGrab.grab()
-            desktop = Path.home() / "Desktop"
-            desktop.mkdir(exist_ok=True)
-            file_name = desktop / f"screenshot_{int(time.time())}.png"
-            screenshot.save(file_name)
 
 
 if __name__ == "__main__":
+    if not acquire_single_instance():
+        raise SystemExit(0)
     root = Tk()
     app = NumpadStreamDeckApp(root)
-
-    def keyboard_handler(event):
-        if not app.should_process_keyboard_event(event):
-            return
-
-        normalized = event.name.lower()
-        alias_map = {
-            "kp0": "0",
-            "kp1": "1",
-            "kp2": "2",
-            "kp3": "3",
-            "kp4": "4",
-            "kp5": "5",
-            "kp6": "6",
-            "kp7": "7",
-            "kp8": "8",
-            "kp9": "9",
-            "num lock": "numlock",
-            "slash": "/",
-            "*": "*",
-            "minus": "-",
-            "backspace": "backspace",
-            "del": "del",
-            "enter": "enter",
-        }
-
-        if app.device_test_active:
-            app._flash_device_test(normalized)
-            return
-
-        key_id = alias_map.get(normalized, normalized)
-        if key_id in app.key_buttons:
-            app.execute_action(key_id)
-
-    if app.raw_input_enabled:
-        app.setup_raw_input_listener()
-        app.refresh_keyboard_devices()
-    else:
-        keyboard.on_press(keyboard_handler)
-
-    def on_close():
-        app._stop_native_bridge()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()

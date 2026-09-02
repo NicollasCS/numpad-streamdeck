@@ -9,6 +9,8 @@ python -m pip install -r requirements.txt
 echo [2/4] Gerando executavel PyInstaller...
 pyinstaller --noconfirm --onefile --windowed --name NumpadStreamDeck numpad_streamdeck.py
 
+if exist cpp\raw_input_filter.exe copy /Y cpp\raw_input_filter.exe dist\raw_input_filter.exe >nul
+
 if not exist dist\NumpadStreamDeck.exe (
     echo ERRO: Executavel nao foi gerado em dist\NumpadStreamDeck.exe
     exit /b 1

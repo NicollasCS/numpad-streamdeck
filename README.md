@@ -1,157 +1,132 @@
 # Numpad Stream Deck
 
-Um aplicativo Windows para transformar seu teclado numérico em um stream deck customizável com atalhos personalizados, presets e suporte a tray icon.
+A Windows desktop app that turns one or more physical keyboards into configurable shortcut pads. Select a keyboard, assign keys to actions, and keep different workflows in separate presets.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.14+-blue)
+## Features
 
-## 🚀 Download Rápido
+- Physical keyboard selection using Windows Raw Input
+- Keyboard test mode showing the device ID and pressed key
+- Per-key names and per-key device identification
+- Presets with create, switch, and delete operations
+- Actions for websites, applications, folders, media, screenshots, lock, text, and shortcuts
+- Shortcut recording for combinations such as `Alt+Left`
+- Optional toggle, double-click, and activation delay for every key
+- System tray support
+- Optional startup with Windows
+- Optional minimize-to-tray behavior
+- Global `Ctrl+Alt+F12` enable/disable shortcut
+- Single-instance protection to prevent duplicate helpers and tray icons
 
-### ⬇️ Opção 1: Installer (Recomendado)
-Clique em [**Releases**](https://github.com/NicollasCS/numpad-streamdeck/releases) e baixe `NumpadStreamDeck_Setup.exe`
+## Supported Actions
 
-Após baixar:
-1. Execute o instalador
-2. Selecione as opções desejadas
-3. Pronto! Abre automaticamente
+- Close Window
+- Open Website
+- Launch Application
+- Open Folder
+- Keyboard Shortcut
+- Play/Pause
+- Previous Track
+- Next Track
+- Volume Up
+- Volume Down
+- Mute
+- Windows+Tab
+- Alt+Tab
+- Type Text+Enter
+- Lock PC
+- Screenshot
 
-### ⬇️ Opção 2: Executável Direto
-Se preferir sem instalação:
-- Baixe `NumpadStreamDeck.exe` em [Releases](https://github.com/NicollasCS/numpad-streamdeck/releases)
-- Execute e pronto!
+## Requirements
 
----
+- Windows 10 or later
+- Python 3.10 or later for running from source
+- Visual Studio C++ build tools for compiling the Raw Input helper
+- Inno Setup 6 only when building the installer
 
-## ✨ Recursos
+## Run From Source
 
-- ✅ **Layout Numpad Customizável** - Configure cada tecla com ações personalizadas
-- ✅ **Presets** - Salve múltiplas configurações e alterne entre elas
-- ✅ **Atalhos Globais** - Use o numpad mesmo com outras janelas ativas
-- ✅ **Tray Icon** - Minimize para a bandeja do sistema
-- ✅ **Inicialização Automática** - Opção de iniciar com Windows
-- ✅ **Interface Intuitiva** - Abas para Presets e Configurações
-
-## 🎮 Ações Suportadas
-
-- Fechar janela
-- Abrir sites / programas / pastas
-- Atalhos de teclado customizados
-- Controle de mídia (play/pause, próxima, anterior, volume)
-- Área de trabalho / Windows+Tab / Alt+Tab
-- Bloquear PC
-- Captura de tela
-- Digitar texto com Enter automático
-
-## ⌨️ Atalhos Globais
-
-| Atalho | Ação |
-|--------|------|
-| `CTRL + ALT + F12` | Ativar/Desativar numpad |
-| `CTRL + ALT + 1` | Trocar para preset "Default" |
-
-## 📁 Estrutura do Projeto
-
-```
-numpad-streamdeck/
-├── numpad_streamdeck.py      # App principal
-├── installer.iss             # Script do instalador Windows
-├── requirements.txt          # Dependências Python
-├── icon.ico                  # Ícone do app
-├── .gitignore               # Arquivos ignorados no Git
-├── LICENSE                  # Licença MIT
-└── README.md                # Este arquivo
-```
-
-## 🛠️ Desenvolvimento
-
-### Branch Strategy (Git Flow)
-
-```
-main (production)
- ↓
-release/* (prepare releases)
- ↓
-develop (integration)
- ↓
-feature/* (new features)
-```
-
-**Branches:**
-- `main` - Código estável, releases apenas
-- `develop` - Código em desenvolvimento, base para features
-- `feature/*` - Novas funcionalidades (ex: `feature/custom-colors`)
-- `release/*` - Preparação para release (ex: `release/1.1.0`)
-
-### Configuração Local
-
-1. Clone o repositório:
-```bash
-git clone https://github.com/NicollasCS/numpad-streamdeck.git
-cd numpad-streamdeck
-```
-
-2. Crie um ambiente virtual:
-```bash
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
-```
-
-3. Instale as dependências:
-```bash
-pip install -r requirements.txt
-```
-
-4. Execute o app:
-```bash
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python numpad_streamdeck.py
 ```
 
-### Build do Executável
+The application stores user data at:
 
-Para gerar o `.exe` pronto para distribuir:
-
-```bash
-pyinstaller --onefile --windowed --name NumpadStreamDeck numpad_streamdeck.py
+```text
+%APPDATA%\NumpadStreamDeck\numpad_presets.json
 ```
 
-O executável será gerado em `dist/NumpadStreamDeck.exe`
+## Physical Keyboard Filtering
 
-### Build do Instalador
+The application uses `cpp/raw_input_filter.exe` to identify the physical keyboard that generated an event. Build it from a Visual Studio Developer Command Prompt:
 
-Requer [Inno Setup 6](https://jrsoftware.org/isdl.php) instalado:
-
-```bash
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+```bat
+cd cpp
+build_raw_input_helper.bat
 ```
 
-O instalador será gerado em `installer/NumpadStreamDeck_Setup.exe`
+Then start the application and open **Settings**:
 
-## 📦 Dependências
+1. Click **Refresh keyboards**.
+2. Select a keyboard from the list.
+3. Use **Rename selected keyboard** if desired.
+4. Use **Test keyboard** to verify the device and key.
 
-- `keyboard` - Detecção global de teclas do numpad
-- `pystray` - Ícone na bandeja do sistema
-- `pillow` - Criação de imagens para tray
-- `tkinter` - Interface gráfica (incluído com Python)
+The helper consumes legacy input for the selected Stream Deck keyboard so configured keys do not leak into the foreground application. Use a dedicated keyboard or numpad for this mode.
 
-## 📝 Licença
+## Configure Keys
 
-Este projeto está licenciado sob a **MIT License** - veja o arquivo [LICENSE](LICENSE) para detalhes.
+1. Open the **Presets** tab.
+2. Click `+` to assign a physical key.
+3. Click **Assign key**, then press the desired key.
+4. Choose an action and fill in its value.
+5. For **Keyboard Shortcut**, use **Record shortcut** or enter a combination such as `Alt+Left`.
+6. Optionally set a key name, toggle mode, double-click mode, or delay in milliseconds.
+7. Click **Save**.
 
-## 🤝 Contribuições
+Existing assignments can be edited, renamed, or moved to another physical key with **Change key**.
 
-Contribuições são bem-vindas! 
+## Build
 
-1. Faça um fork do projeto
-2. Crie uma branch para sua feature (`git checkout -b feature/AmazingFeature`)
-3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
-4. Push para a branch (`git push origin feature/AmazingFeature`)
-5. Abra um Pull Request
+The release script installs Python dependencies, builds the executable, copies the Raw Input helper, and optionally creates the Inno Setup installer:
 
-## 💬 Dúvidas?
+```bat
+build_release.bat
+```
 
-Abra uma [Issue](https://github.com/NicollasCS/numpad-streamdeck/issues) com sua pergunta!
+Outputs:
 
----
+```text
+dist\NumpadStreamDeck.exe
+dist\raw_input_filter.exe
+installer\NumpadStreamDeck_Setup.exe
+```
 
-**Made with ❤️**
+The installer build requires Inno Setup to be installed and available as `iscc` in `PATH`.
+
+## Tests
+
+Run the tests with the project virtual environment:
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
+## Project Structure
+
+```text
+numpad_streamdeck.py          Main Tkinter application
+cpp/raw_input_filter.cpp     Windows Raw Input helper source
+cpp/build_raw_input_helper.bat  Helper build script
+tests/                       Keyboard filter and bridge tests
+build_release.bat            Executable and installer build script
+installer.iss                Inno Setup configuration
+requirements.txt             Python dependencies
+icon.ico                     Application icon
+```
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
