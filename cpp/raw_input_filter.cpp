@@ -208,15 +208,13 @@ static LRESULT CALLBACK RawInputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         USHORT flags = raw->data.keyboard.Flags;
         bool pressed = !(flags & RI_KEY_BREAK);
 
-        if (pressed) {
-            std::wstring keyName = GetKeyNameFromVk(vk);
-            std::wcout << L"{\"device\":\"" << ToJsonString(deviceName)
-                       << L"\",\"handle\":\"" << ToJsonString(ToHexPointer(hDevice))
-                       << L"\",\"vk\":" << vk
-                       << L",\"name\":\"" << ToJsonString(keyName)
-                       << L"\",\"pressed\":true}\n";
-            std::wcout.flush();
-        }
+        std::wstring keyName = GetKeyNameFromVk(vk);
+        std::wcout << L"{\"device\":\"" << ToJsonString(deviceName)
+                   << L"\",\"handle\":\"" << ToJsonString(ToHexPointer(hDevice))
+                   << L"\",\"vk\":" << vk
+                   << L",\"name\":\"" << ToJsonString(keyName)
+                   << L"\",\"pressed\":" << (pressed ? L"true" : L"false") << L"}\n";
+        std::wcout.flush();
 
         return 0;
     }

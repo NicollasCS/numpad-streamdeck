@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, Toplevel, filedialog, messagebox, simpledialog
@@ -24,7 +25,9 @@ from PIL import Image
 APP_NAME = "Numpad Stream Deck"
 APPDATA_DIR = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "NumpadStreamDeck"
 PRESET_FILE = APPDATA_DIR / "numpad_presets.json"
-APP_VERSION = "v2"
+APP_VERSION = "v2.2.0"
+REPOSITORY_URL = "https://github.com/NicollasCS/numpad-streamdeck"
+DOUBLE_CLICK_INTERVAL = 0.4
 _instance_mutex = None
 
 
@@ -37,12 +40,18 @@ def acquire_single_instance():
     _instance_mutex = kernel32.CreateMutexW(None, False, "Local\\NumpadStreamDeck")
     return kernel32.GetLastError() != 183
 
+
+def resource_path(filename):
+    """Resolve a bundled resource in source and PyInstaller builds."""
+    bundle_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return bundle_dir / filename
+
 # Actions available
 ACTION_TYPES = [
     "None",
     "Close Window",
     "Open Website",
-    "Launch Application",
+    "Open File or Application",
     "Open Folder",
     "Keyboard Shortcut",
     "Play/Pause",
@@ -51,10 +60,7 @@ ACTION_TYPES = [
     "Volume Up",
     "Volume Down",
     "Mute",
-    "Windows + Tab",
-    "Alt + Tab",
-    "Type Text + Enter",
-    "Lock PC",
+    "Type Text",
     "Screenshot",
 ]
 
@@ -62,7 +68,7 @@ ACTION_MAP = {
     "None": "none",
     "Close Window": "close_window",
     "Open Website": "open_site",
-    "Launch Application": "open_program",
+    "Open File or Application": "open_program",
     "Open Folder": "open_folder",
     "Keyboard Shortcut": "hotkey",
     "Play/Pause": "play_pause",
@@ -71,11 +77,15 @@ ACTION_MAP = {
     "Volume Up": "volume_up",
     "Volume Down": "volume_down",
     "Mute": "mute",
-    "Windows + Tab": "windows_tab",
-    "Alt + Tab": "alt_tab",
-    "Type Text + Enter": "write_text",
-    "Lock PC": "lock_pc",
+    "Type Text": "write_text",
     "Screenshot": "screenshot",
+}
+TOGGLE_ACTION_TYPES = {"Keyboard Shortcut", "Type Text"}
+BROWSE_ACTION_TYPES = {"Open File or Application", "Open Folder"}
+GESTURE_TYPES = {
+    "Quick press": "quick_press",
+    "Hold": "hold",
+    "Double click": "double_click",
 }
 
 
@@ -192,11 +202,18 @@ class NumpadStreamDeckApp:
         self.keyboard_device_var = StringVar(value="All keyboards")
         self.keyboard_full_id_var = StringVar(value="No keyboard selected")
         self.available_keyboard_devices = []
-        self.native_helper = Path(__file__).resolve().parent / "cpp" / "raw_input_filter.exe"
+        app_directory = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+        self.native_helper = app_directory / "cpp" / "raw_input_filter.exe"
         self.native_process = None
         self.native_reader = None
         self.shortcut_recording_callback = None
+        self._assignment_generation = 0
+        self._assignment_key_var = None
+        self._assignment_key_label = None
         self.toggle_states = {}
+        self.toggle_jobs = {}
+        self.held_keys = {}
+        self.pending_taps = {}
         self.last_press_times = {}
         self.device_test_active = False
         self.device_test_status_var = StringVar(value="")
@@ -326,6 +343,8 @@ class NumpadStreamDeckApp:
             command=self._set_streamdeck_disabled,
         ).pack(anchor="w")
         ttk.Label(preferences, text="Toggle shortcut: CTRL+ALT+F12").pack(anchor="w", pady=(8, 0))
+        ttk.Label(preferences, text=f"Version: {APP_VERSION}").pack(anchor="w", pady=(8, 0))
+        ttk.Label(preferences, text=f"Repository: {REPOSITORY_URL}").pack(anchor="w")
 
     def _create_preset(self):
         name = simpledialog.askstring(APP_NAME, "Preset name:", parent=self.root)
@@ -399,24 +418,39 @@ class NumpadStreamDeckApp:
             return
 
         for key_id, action in sorted(keys.items()):
-            self._add_key_row(key_id, action)
+            action_store = self._get_action_store(action)
+            if action_store:
+                for action_id, gesture_action in action_store.items():
+                    self._add_key_row(
+                        key_id,
+                        action,
+                        gesture_action,
+                        gesture_action.get("gesture", "quick_press"),
+                        action_id,
+                    )
+            else:
+                self._add_key_row(key_id, action)
 
-    def _add_key_row(self, key_id, action):
+    def _add_key_row(self, key_id, key_entry, action=None, gesture="quick_press", action_id=None):
         """Add a key row"""
+        action = action or self._get_gesture_action(key_entry, gesture) or key_entry
         row = ttk.Frame(self.keys_container)
         row.pack(fill="x", pady=4)
 
         # Key label
         key_label = ttk.Label(
             row,
-            text=self._display_key_id(key_id, action.get("name", "")),
+            text=self._display_key_id(
+                key_id, f"{gesture.replace('_', ' ').title()} : {self._display_action_name(action)}"
+            ),
             font=("Arial", 10, "bold"),
             width=32,
         )
         key_label.pack(side="left")
 
         # Action combobox
-        action_type = action.get("type", "none")
+        display_action = self._get_gesture_action(action, "quick_press") or action
+        action_type = display_action.get("type", "none")
         action_label = self._get_action_label(action_type)
 
         action_var = StringVar(value=action_label)
@@ -428,13 +462,25 @@ class NumpadStreamDeckApp:
             width=25,
         )
         combo.pack(side="left", padx=(20, 8), fill="x", expand=True)
-        combo.bind("<<ComboboxSelected>>", lambda e: self._set_action(key_id, action_var.get()))
+        combo.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._set_action(key_id, action_var.get(), gesture),
+        )
 
         # Edit button
-        ttk.Button(row, text="Edit", command=lambda: self._edit_key(key_id)).pack(side="right", padx=(4, 0))
+        ttk.Button(
+            row,
+            text="Edit",
+            command=lambda: self._edit_key(key_id, gesture),
+        ).pack(side="right", padx=(4, 0))
 
         # Delete button
-        ttk.Button(row, text="-", width=2, command=lambda: self._delete_key(key_id)).pack(side="right")
+        ttk.Button(
+            row,
+            text="-",
+            width=2,
+            command=lambda: self._delete_key(key_id, action_id),
+        ).pack(side="right")
 
     def _assign_key(self):
         """Open assign key dialog"""
@@ -452,58 +498,118 @@ class NumpadStreamDeckApp:
         toggle_var = BooleanVar(value=False)
         double_click_var = BooleanVar(value=False)
         delay_var = StringVar(value="0")
+        toggle_interval_var = StringVar(value="1000")
+        send_when_executed_var = BooleanVar(value=True)
+        gesture_var = StringVar(value="Quick press")
 
         ttk.Label(dialog, text="Press a key:", font=("Arial", 10, "bold")).pack(anchor="w", padx=14, pady=(14, 8))
         key_label = ttk.Label(dialog, text="Waiting...", font=("Arial", 11), foreground="#0066cc")
         key_label.pack(anchor="w", padx=14, pady=(0, 12))
+        conflict_var = StringVar(value="")
+        ttk.Label(dialog, textvariable=conflict_var, foreground="#d97706", wraplength=430).pack(
+            anchor="w", padx=14, pady=(0, 8)
+        )
+
+        def update_key_conflict(*_args):
+            selected_key = key_var.get()
+            existing_action = self.presets.get_current().get("keys", {}).get(selected_key)
+            if not existing_action:
+                conflict_var.set("")
+                return
+            assignments = []
+            for gesture_name, gesture_label in GESTURE_TYPES.items():
+                gesture_action = self._get_gesture_action(existing_action, gesture_label)
+                if gesture_action:
+                    assigned_name = gesture_action.get("name", "").strip() or "Unnamed"
+                    assigned_function = self._get_action_label(gesture_action.get("type", "none"))
+                    assignments.append(f"{gesture_name}: {assigned_name} ({assigned_function})")
+            conflict_var.set(
+                f"Another function is already assigned to key {selected_key}: "
+                f"{' ; '.join(assignments)}."
+            )
+
+        key_var.trace_add("write", update_key_conflict)
+        key_action_row = ttk.Frame(dialog)
+        key_action_row.pack(fill="x", padx=14, pady=(0, 12))
         assign_button = ttk.Button(
-            dialog,
+            key_action_row,
             text="Assign key",
             command=lambda: self._begin_key_capture(key_var, key_label, assign_button),
         )
-        assign_button.pack(anchor="w", padx=14, pady=(0, 12))
+        assign_button.pack(side="left")
 
         ttk.Label(dialog, text="Function:", font=("Arial", 10, "bold")).pack(anchor="w", padx=14, pady=(0, 4))
         func_combo = ttk.Combobox(
             dialog, textvariable=func_var, values=["None"] + list(ACTION_MAP.keys())[1:], state="readonly"
         )
         func_combo.pack(fill="x", padx=14, pady=(0, 16))
+        ttk.Label(dialog, text="Gesture:").pack(anchor="w", padx=14, pady=(0, 4))
+        ttk.Combobox(
+            dialog, textvariable=gesture_var, values=list(GESTURE_TYPES), state="readonly"
+        ).pack(fill="x", padx=14, pady=(0, 10))
+
+        send_check = ttk.Checkbutton(
+            key_action_row, text="Send when executed?", variable=send_when_executed_var
+        )
 
         ttk.Label(dialog, text="Key name:").pack(anchor="w", padx=14, pady=(0, 4))
         ttk.Entry(dialog, textvariable=name_var).pack(fill="x", padx=14)
         ttk.Label(dialog, text="Value:").pack(anchor="w", padx=14, pady=(10, 4))
-        ttk.Entry(dialog, textvariable=value_var).pack(fill="x", padx=14)
+        value_entry = ttk.Entry(dialog, textvariable=value_var)
+        value_entry.pack(fill="x", padx=14)
+        browse_row = ttk.Frame(dialog)
+        browse_row.pack(fill="x", padx=14, pady=(6, 0))
         shortcut_button = ttk.Button(
-            dialog,
+            browse_row,
             text="Record shortcut",
             command=lambda: self._start_shortcut_recording(value_var, shortcut_button),
         )
-        shortcut_button.pack(anchor="w", padx=14, pady=(6, 0))
+        browse_button = ttk.Button(browse_row, text="Browse", command=lambda: browse())
+        browse_button.pack(side="left")
 
         def update_shortcut_controls(_event=None):
-            shortcut_button.state(
-                ["!disabled"] if func_var.get() == "Keyboard Shortcut" else ["disabled"]
+            is_text = func_var.get() == "Type Text"
+            value_entry.state(["!disabled"] if is_text else ["disabled"])
+            if func_var.get() == "Keyboard Shortcut":
+                shortcut_button.pack(side="left", padx=(8, 0))
+                shortcut_button.state(["!disabled"])
+            else:
+                shortcut_button.pack_forget()
+            if is_text:
+                send_check.pack(side="left", padx=(8, 0))
+            else:
+                send_check.pack_forget()
+            browse_button.state(
+                ["!disabled"] if func_var.get() in BROWSE_ACTION_TYPES else ["disabled"]
             )
 
         func_combo.bind("<<ComboboxSelected>>", update_shortcut_controls)
         update_shortcut_controls()
-        options = ttk.LabelFrame(dialog, text="Activation", padding=8)
-        options.pack(fill="x", padx=14, pady=(10, 4))
-        ttk.Checkbutton(options, text="Toggle", variable=toggle_var).pack(anchor="w")
-        ttk.Checkbutton(options, text="Double click", variable=double_click_var).pack(anchor="w")
-        delay_row = ttk.Frame(options)
-        delay_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(delay_row, text="Delay (ms):").pack(side="left")
-        ttk.Entry(delay_row, textvariable=delay_var, width=10).pack(side="left", padx=(8, 0))
+        hold_row = ttk.Frame(dialog)
+        ttk.Label(hold_row, text="Hold for (ms):").pack(side="left")
+        ttk.Entry(hold_row, textvariable=delay_var, width=10).pack(
+            side="left", padx=(8, 0)
+        )
+
+        def update_action_controls(_event=None):
+            if gesture_var.get() == "Hold":
+                hold_row.pack(fill="x", padx=14, pady=(8, 0))
+            else:
+                hold_row.pack_forget()
+
+        func_combo.bind("<<ComboboxSelected>>", update_action_controls, add="+")
+        gesture_var.trace_add("write", lambda *_: update_action_controls())
+        update_action_controls()
 
         def browse():
-            selected = filedialog.askopenfilename(
-                filetypes=[("Executables", "*.exe"), ("All files", "*.*")]
-            )
+            if func_var.get() == "Open Folder":
+                selected = filedialog.askdirectory()
+            else:
+                selected = filedialog.askopenfilename(
+                    filetypes=[("Executables", "*.exe"), ("All files", "*.*")]
+                )
             if selected:
                 value_var.set(selected)
-
-        ttk.Button(dialog, text="Browse", command=browse).pack(anchor="w", padx=14, pady=(6, 0))
 
         def on_key(event):
             if not getattr(self, "_assigning", False):
@@ -531,14 +637,23 @@ class NumpadStreamDeckApp:
             except ValueError:
                 messagebox.showwarning(APP_NAME, "Delay must be a whole number in milliseconds")
                 return
-            preset["keys"][key_var.get()] = {
+            new_action = {
                 "type": code,
                 "value": value_var.get(),
                 "name": name_var.get().strip(),
                 "toggle": toggle_var.get(),
                 "double_click": double_click_var.get(),
                 "delay_ms": delay_ms,
+                "toggle_interval_ms": max(1, int(toggle_interval_var.get() or 1000)),
+                "send_when_executed": send_when_executed_var.get(),
             }
+            key_entry = preset["keys"].get(key_var.get(), {})
+            actions = self._get_action_store(key_entry)
+            action_id = str(uuid.uuid4())
+            new_action["id"] = action_id
+            new_action["gesture"] = GESTURE_TYPES[gesture_var.get()]
+            actions[action_id] = new_action
+            preset["keys"][key_var.get()] = {"actions": actions}
             self.presets.save()
             self._stop_assign()
             self._refresh_keys()
@@ -557,7 +672,7 @@ class NumpadStreamDeckApp:
 
         dialog.protocol("WM_DELETE_WINDOW", on_close)
 
-    def _edit_key(self, key_id):
+    def _edit_key(self, key_id, gesture="quick_press"):
         """Edit key action"""
         dialog = Toplevel(self.root)
         dialog.title(f"Edit - {key_id}")
@@ -567,7 +682,8 @@ class NumpadStreamDeckApp:
         dialog.grab_set()
 
         preset = self.presets.get_current()
-        action = preset.get("keys", {}).get(key_id, {"type": "none", "value": ""})
+        key_entry = preset.get("keys", {}).get(key_id, {"type": "none", "value": ""})
+        action = self._get_gesture_action(key_entry, gesture) or {"type": "none", "value": ""}
 
         action_type = action.get("type", "none")
         action_label = self._get_action_label(action_type)
@@ -579,58 +695,129 @@ class NumpadStreamDeckApp:
         toggle_var = BooleanVar(value=bool(action.get("toggle", False)))
         double_click_var = BooleanVar(value=bool(action.get("double_click", False)))
         delay_var = StringVar(value=str(action.get("delay_ms", 0)))
+        toggle_interval_var = StringVar(value=str(action.get("toggle_interval_ms", 1000)))
+        send_when_executed_var = BooleanVar(value=action.get("send_when_executed", True))
+        gesture_label = next(
+            (label for label, value in GESTURE_TYPES.items() if value == gesture),
+            "Quick press",
+        )
+        gesture_var = StringVar(value=gesture_label)
+        gesture_drafts = {}
+        current_gesture = "quick_press"
 
-        ttk.Label(dialog, text="Action:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(14, 4))
+        key_capture_label = ttk.Label(dialog, text=self._display_key_id(key_id), foreground="#666")
+        key_capture_label.pack(anchor="w", padx=14, pady=(14, 4))
+        key_change_row = ttk.Frame(dialog)
+        key_change_row.pack(fill="x", padx=14)
+        ttk.Button(
+            key_change_row,
+            text="Change key",
+            command=lambda: self._begin_key_capture(selected_key_var, key_capture_label),
+        ).pack(side="left")
+
+        send_check = ttk.Checkbutton(
+            key_change_row, text="Send when executed?", variable=send_when_executed_var
+        )
+
+        ttk.Label(dialog, text="Action:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(12, 4))
         action_combo = ttk.Combobox(
             dialog, textvariable=action_var, values=ACTION_TYPES, state="readonly", width=35
         )
         action_combo.pack(fill="x", padx=14)
-
-        ttk.Label(dialog, text="Value:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(12, 4))
-        value_entry = ttk.Entry(dialog, textvariable=value_var)
-        value_entry.pack(fill="x", padx=14)
+        ttk.Label(dialog, text="Gesture:").pack(anchor="w", padx=14, pady=(8, 4))
+        gesture_combo = ttk.Combobox(
+            dialog, textvariable=gesture_var, values=list(GESTURE_TYPES), state="readonly"
+        )
+        gesture_combo.pack(fill="x", padx=14)
 
         ttk.Label(dialog, text="Key name:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(10, 4))
         ttk.Entry(dialog, textvariable=name_var).pack(fill="x", padx=14)
-        key_capture_label = ttk.Label(dialog, text=self._display_key_id(key_id), foreground="#666")
-        key_capture_label.pack(anchor="w", padx=14, pady=(6, 0))
-        ttk.Button(
-            dialog,
-            text="Change key",
-            command=lambda: self._begin_key_capture(selected_key_var, key_capture_label),
-        ).pack(anchor="w", padx=14, pady=(2, 0))
+        ttk.Label(dialog, text="Value:", font=("Arial", 10)).pack(anchor="w", padx=14, pady=(10, 4))
+        value_entry = ttk.Entry(dialog, textvariable=value_var)
+        value_entry.pack(fill="x", padx=14)
+
+        browse_row = ttk.Frame(dialog)
+        browse_row.pack(fill="x", padx=14, pady=(8, 4))
 
         shortcut_button = ttk.Button(
-            dialog,
+            browse_row,
             text="Record shortcut",
             command=lambda: self._start_shortcut_recording(value_var, shortcut_button),
         )
-        shortcut_button.pack(anchor="w", padx=14, pady=(6, 0))
+        browse_button = ttk.Button(browse_row, text="Browse", command=lambda: browse())
+        browse_button.pack(side="left")
+
+        def load_gesture(_event=None):
+            nonlocal current_gesture
+            gesture_drafts[current_gesture] = {
+                "type": ACTION_MAP.get(action_var.get(), "none"),
+                "value": value_var.get(),
+                "toggle": toggle_var.get(),
+                "double_click": double_click_var.get(),
+                "delay_ms": delay_var.get(),
+                "send_when_executed": send_when_executed_var.get(),
+            }
+            selected_gesture = GESTURE_TYPES[gesture_var.get()]
+            current_gesture = selected_gesture
+            selected_action = self._get_gesture_action(
+                preset.get("keys", {}).get(key_id, key_entry),
+                selected_gesture,
+            )
+            selected_action = gesture_drafts.get(selected_gesture, selected_action) or {
+                "type": "none", "value": ""
+            }
+            action_var.set(self._get_action_label(selected_action.get("type", "none")))
+            value_var.set(selected_action.get("value", ""))
+            delay_var.set(str(selected_action.get("delay_ms", 0)))
+            send_when_executed_var.set(selected_action.get("send_when_executed", True))
+            update_shortcut_controls()
+            update_action_controls()
 
         def update_shortcut_controls(_event=None):
-            if action_var.get() == "Keyboard Shortcut":
+            is_text = action_var.get() == "Type Text"
+            is_shortcut = action_var.get() == "Keyboard Shortcut"
+            value_entry.state(["!disabled"] if is_text else ["disabled"])
+            if is_shortcut:
+                shortcut_button.pack(side="left", padx=(8, 0))
                 shortcut_button.state(["!disabled"])
             else:
-                shortcut_button.state(["disabled"])
+                shortcut_button.pack_forget()
+            if is_text:
+                send_check.pack(side="left", padx=(8, 0))
+            else:
+                send_check.pack_forget()
+            browse_button.state(
+                ["!disabled"] if action_var.get() in BROWSE_ACTION_TYPES else ["disabled"]
+            )
 
         action_combo.bind("<<ComboboxSelected>>", update_shortcut_controls)
-        update_shortcut_controls()
+        gesture_combo.bind("<<ComboboxSelected>>", load_gesture)
 
-        options = ttk.LabelFrame(dialog, text="Activation", padding=8)
-        options.pack(fill="x", padx=14, pady=(12, 4))
-        ttk.Checkbutton(options, text="Toggle", variable=toggle_var).pack(anchor="w")
-        ttk.Checkbutton(options, text="Double click", variable=double_click_var).pack(anchor="w")
-        delay_row = ttk.Frame(options)
-        delay_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(delay_row, text="Delay (ms):").pack(side="left")
-        ttk.Entry(delay_row, textvariable=delay_var, width=10).pack(side="left", padx=(8, 0))
+        hold_row = ttk.Frame(dialog)
+        ttk.Label(hold_row, text="Hold for (ms):").pack(side="left")
+        ttk.Entry(hold_row, textvariable=delay_var, width=10).pack(
+            side="left", padx=(8, 0)
+        )
 
+        def update_action_controls(_event=None):
+            if gesture_var.get() == "Hold":
+                hold_row.pack(fill="x", padx=14, pady=(8, 0))
+            else:
+                hold_row.pack_forget()
+
+        action_combo.bind("<<ComboboxSelected>>", update_action_controls, add="+")
+        toggle_var.trace_add("write", lambda *_: update_action_controls())
+        gesture_var.trace_add("write", lambda *_: update_action_controls())
         def browse():
-            f = filedialog.askopenfilename(filetypes=[("Executables", "*.exe"), ("All", "*.*")])
+            if action_var.get() == "Open Folder":
+                f = filedialog.askdirectory()
+            else:
+                f = filedialog.askopenfilename(filetypes=[("All files", "*.*")])
             if f:
                 value_var.set(f)
 
-        ttk.Button(dialog, text="Browse", command=browse).pack(anchor="w", padx=14, pady=(8, 4))
+        update_shortcut_controls()
+        update_action_controls()
 
         def save():
             code = ACTION_MAP.get(action_var.get(), "none")
@@ -646,14 +833,32 @@ class NumpadStreamDeckApp:
                 "toggle": toggle_var.get(),
                 "double_click": double_click_var.get(),
                 "delay_ms": delay_ms,
+                "toggle_interval_ms": max(1, int(toggle_interval_var.get() or 1000)),
+                "send_when_executed": send_when_executed_var.get(),
             }
             new_key_id = selected_key_var.get().strip()
             if not new_key_id:
                 messagebox.showwarning(APP_NAME, "Press a key before saving")
                 return
             if new_key_id != key_id:
+                if new_key_id in preset["keys"]:
+                    messagebox.showwarning(APP_NAME, "That key is already assigned in this preset")
+                    return
                 preset["keys"].pop(key_id, None)
-            preset["keys"][new_key_id] = updated_action
+                self.toggle_states.pop(key_id, None)
+                self.last_press_times.pop(key_id, None)
+            existing_entry = preset["keys"].get(new_key_id, {})
+            actions = self._get_action_store(existing_entry)
+            selected_gesture = GESTURE_TYPES[gesture_var.get()]
+            matching_action = next(
+                (item for item in actions.values() if item.get("gesture") == selected_gesture),
+                None,
+            )
+            action_id = str(matching_action.get("id") if matching_action else uuid.uuid4())
+            updated_action["id"] = action_id
+            updated_action["gesture"] = selected_gesture
+            actions[action_id] = updated_action
+            preset["keys"][new_key_id] = {"actions": actions}
             self.presets.save()
             self._stop_assign()
             self._stop_shortcut_recording()
@@ -666,8 +871,13 @@ class NumpadStreamDeckApp:
         ttk.Button(
             button_frame,
             text="Cancel",
-            command=lambda: (self._stop_shortcut_recording(), dialog.destroy()),
+            command=lambda: (self._stop_assign(), self._stop_shortcut_recording(), dialog.destroy()),
         ).pack(side="left")
+
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (self._stop_assign(), self._stop_shortcut_recording(), dialog.destroy()),
+        )
 
     def _start_shortcut_recording(self, value_var, button):
         """Capture a key combination such as alt+left."""
@@ -703,6 +913,7 @@ class NumpadStreamDeckApp:
     def _begin_key_capture(self, key_var, key_label, button=None):
         """Capture a physical key for a new or existing assignment."""
         self._stop_assign()
+        self._assignment_generation += 1
         self._assigning = True
         self._assignment_key_var = key_var
         self._assignment_key_label = key_label
@@ -730,29 +941,67 @@ class NumpadStreamDeckApp:
 
         self.recording_callback = keyboard.on_press(on_key)
 
-    def _delete_key(self, key_id):
+    def _delete_key(self, key_id, action_id=None):
         """Delete key"""
-        if messagebox.askyesno(APP_NAME, f"Delete '{key_id}'?"):
+        if messagebox.askyesno(APP_NAME, f"Delete '{key_id}'?" if action_id is None else "Delete this function?"):
             preset = self.presets.get_current()
             if key_id in preset.get("keys", {}):
-                del preset["keys"][key_id]
+                if action_id is not None:
+                    action_store = self._get_action_store(preset["keys"][key_id])
+                    action_store.pop(str(action_id), None)
+                    if action_store:
+                        preset["keys"][key_id] = {"actions": action_store}
+                    else:
+                        del preset["keys"][key_id]
+                else:
+                    del preset["keys"][key_id]
+                self._cancel_toggle(key_id)
+                self.toggle_states.pop(key_id, None)
+                self.last_press_times.pop(key_id, None)
                 self.presets.save()
                 self._refresh_keys()
 
-    def _set_action(self, key_id, action_label):
+    def _set_action(self, key_id, action_label, gesture="quick_press"):
         """Set action for key"""
         code = ACTION_MAP.get(action_label, "none")
         preset = self.presets.get_current()
         action = preset["keys"].get(key_id, {})
+        if isinstance(action.get("actions"), dict) or isinstance(action.get("gestures"), dict):
+            action_store = self._get_action_store(action)
+            selected_id = next(
+                (action_id for action_id, item in action_store.items() if item.get("gesture") == gesture),
+                str(uuid.uuid4()),
+            )
+            selected_action = dict(action_store.get(selected_id, {}))
+            selected_action.update({"id": selected_id, "gesture": gesture, "type": code})
+            selected_action.setdefault("value", "")
+            action_store[selected_id] = selected_action
+            action["actions"] = action_store
+            action.pop("gestures", None)
+            self.presets.save()
+            return
         action["type"] = code
         action.setdefault("value", "")
         preset["keys"][key_id] = action
         self.presets.save()
 
+    def _display_action_name(self, action):
+        """Return the configured name from the first available gesture."""
+        for gesture in ("quick_press", "hold", "double_click"):
+            gesture_action = self._get_gesture_action(action, gesture)
+            if gesture_action and gesture_action.get("name"):
+                return gesture_action["name"]
+        return ""
+
     def _switch_preset(self):
         """Switch preset"""
         name = self.preset_var.get()
+        self._clear_held_keys()
+        for key_id in list(getattr(self, "toggle_jobs", {})):
+            self._cancel_toggle(key_id)
         self.presets.switch(name)
+        self.toggle_states.clear()
+        self.last_press_times.clear()
         self._refresh_keys()
 
     def _listen_keys(self):
@@ -763,7 +1012,7 @@ class NumpadStreamDeckApp:
             return
 
         def handler(event):
-            if not self.enabled:
+            if not self.should_process_keyboard_event(event):
                 return
             if self.device_test_active:
                 self.device_test_status_var.set(
@@ -773,10 +1022,12 @@ class NumpadStreamDeckApp:
             key_id = self._normalize_key(event.name)
             preset = self.presets.get_current()
             action = preset.get("keys", {}).get(key_id)
-            if action:
-                self._process_key_press(key_id, action)
+            if action and event.event_type == "down":
+                self._handle_key_event(key_id, action, True)
+            elif event.event_type == "up":
+                self._handle_key_event(key_id, None, False)
 
-        threading.Thread(target=lambda: keyboard.on_press(handler), daemon=True).start()
+        threading.Thread(target=lambda: keyboard.hook(handler, suppress=True), daemon=True).start()
 
     def _refresh_keyboard_devices(self):
         """Load physical keyboards from the Raw Input helper."""
@@ -886,12 +1137,21 @@ class NumpadStreamDeckApp:
                 return
             for line in self.native_process.stdout:
                 event = self._parse_native_event_line(line)
-                if not event or not event.get("pressed"):
+                if not event:
                     continue
                 if not self._native_event_matches_selected_device(event):
                     continue
+                if not event.get("pressed"):
+                    self.root.after(0, lambda item=event: self._handle_key_event(
+                        self._event_key_id(item), None, False
+                    ))
+                    continue
                 if getattr(self, "_assigning", False):
-                    self.root.after(0, lambda item=event: self._capture_native_key(item))
+                    generation = self._assignment_generation
+                    self.root.after(
+                        0,
+                        lambda item=event, token=generation: self._capture_native_key(item, token),
+                    )
                     continue
                 if self.device_test_active:
                     self.root.after(0, lambda item=event: self._show_keyboard_test_event(item))
@@ -905,7 +1165,9 @@ class NumpadStreamDeckApp:
                 if action:
                     self.root.after(
                         0,
-                        lambda item_key=event_id, item=action: self._process_key_press(item_key, item),
+                        lambda item_key=event_id, item=action: self._handle_key_event(
+                            item_key, item, True
+                        ),
                     )
 
         self.native_reader = threading.Thread(target=read_events, daemon=True)
@@ -913,35 +1175,191 @@ class NumpadStreamDeckApp:
 
     def _stop_native_listener(self):
         """Stop the Raw Input helper when the application exits."""
+        self._clear_held_keys()
         if self.native_process:
             self.native_process.terminate()
             self.native_process = None
+
+    def _handle_key_event(self, key_id, action, pressed):
+        """Track a physical key cycle and dispatch its configured gesture."""
+        if not pressed:
+            state = self.held_keys.pop(key_id, None)
+            if state and state.get("job") is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except (AttributeError, tk.TclError):
+                    pass
+            if state and state.get("activated"):
+                deferred_action = state.get("deferred_action")
+                if deferred_action:
+                    self._execute_action(deferred_action)
+                return
+            if state:
+                self._register_tap(key_id, state.get("entry"))
+            return
+        if key_id in self.held_keys:
+            return
+
+        state = {"job": None, "activated": False, "entry": action}
+        self.held_keys[key_id] = state
+        hold_action = self._get_gesture_action(action, "hold")
+        if hold_action:
+            try:
+                hold_ms = max(1, int(hold_action.get("delay_ms", 1000) or 1000))
+            except (TypeError, ValueError):
+                hold_ms = 1000
+            state["job"] = self.root.after(
+                hold_ms, lambda: self._activate_held_key(key_id, hold_action, state)
+            )
+
+    def _activate_held_key(self, key_id, action, state):
+        """Activate a key after it remains pressed for the required time."""
+        if self.held_keys.get(key_id) is not state:
+            return
+        state["job"] = None
+        state["activated"] = True
+        if action.get("type") == "write_text":
+            state["deferred_action"] = action
+            return
+        self._execute_action(action)
+
+    def _register_tap(self, key_id, key_entry):
+        """Delay a single tap long enough to detect a second tap."""
+        if not hasattr(self, "pending_taps"):
+            self.pending_taps = {}
+        pending = self.pending_taps.get(key_id)
+        if pending:
+            self.root.after_cancel(pending["job"])
+            self.pending_taps.pop(key_id, None)
+            double_action = self._get_gesture_action(key_entry, "double_click")
+            if double_action:
+                self._execute_action(double_action)
+                return
+
+        quick_action = self._get_gesture_action(key_entry, "quick_press")
+        if not quick_action:
+            return
+        pending = {"job": None}
+        pending["job"] = self.root.after(
+            int(DOUBLE_CLICK_INTERVAL * 1000),
+            lambda: self._execute_pending_tap(key_id, quick_action, pending),
+        )
+        self.pending_taps[key_id] = pending
+
+    def _execute_pending_tap(self, key_id, action, pending):
+        """Execute a tap after the double-click detection window expires."""
+        if self.pending_taps.get(key_id) is not pending:
+            return
+        self.pending_taps.pop(key_id, None)
+        self._execute_action(action)
+
+    def _get_gesture_action(self, key_entry, gesture):
+        """Return a gesture action, including migration for legacy assignments."""
+        if not isinstance(key_entry, dict):
+            return None
+        actions = key_entry.get("actions") if isinstance(key_entry, dict) else None
+        if isinstance(actions, dict):
+            for action in actions.values():
+                if action.get("gesture") == gesture and action.get("type") != "none":
+                    return action
+        gestures = key_entry.get("gestures")
+        if isinstance(gestures, dict):
+            action = gestures.get(gesture)
+            return action if isinstance(action, dict) and action.get("type") != "none" else None
+        if gesture == "quick_press" and key_entry.get("type", "none") != "none":
+            return key_entry
+        return None
+
+    def _get_action_store(self, key_entry):
+        """Return independent action records, migrating older key formats."""
+        if isinstance(key_entry, dict) and isinstance(key_entry.get("actions"), dict):
+            return {str(action_id): dict(action) for action_id, action in key_entry["actions"].items()}
+
+        store = {}
+        if isinstance(key_entry, dict) and isinstance(key_entry.get("gestures"), dict):
+            for gesture, action in key_entry["gestures"].items():
+                if isinstance(action, dict):
+                    action_copy = dict(action)
+                    action_copy["gesture"] = gesture
+                    action_id = str(action_copy.get("id") or uuid.uuid4())
+                    action_copy["id"] = action_id
+                    store[action_id] = action_copy
+        elif isinstance(key_entry, dict) and key_entry.get("type", "none") != "none":
+            action_copy = dict(key_entry)
+            action_copy["gesture"] = "quick_press"
+            action_id = str(action_copy.get("id") or uuid.uuid4())
+            action_copy["id"] = action_id
+            store[action_id] = action_copy
+        return store
+
+    def _clear_held_keys(self):
+        """Cancel pending hold timers and forget pressed keys."""
+        for state in self.held_keys.values():
+            if state.get("job") is not None:
+                try:
+                    self.root.after_cancel(state["job"])
+                except (AttributeError, tk.TclError):
+                    pass
+        self.held_keys.clear()
+        for pending in self.pending_taps.values():
+            try:
+                self.root.after_cancel(pending["job"])
+            except (AttributeError, tk.TclError):
+                pass
+        self.pending_taps.clear()
 
     def _process_key_press(self, key_id, action):
         """Apply activation options before executing a configured action."""
         if not self.enabled:
             return
 
-        now = time.monotonic()
         if action.get("double_click", False):
             previous = self.last_press_times.get(key_id, 0)
-            self.last_press_times[key_id] = now
-            if now - previous > 0.4:
+            now = time.monotonic()
+            if now - previous > DOUBLE_CLICK_INTERVAL:
+                self.last_press_times[key_id] = now
                 return
+            self.last_press_times.pop(key_id, None)
 
         if action.get("toggle", False):
             self.toggle_states[key_id] = not self.toggle_states.get(key_id, False)
             if not self.toggle_states[key_id]:
+                self._cancel_toggle(key_id)
                 return
+            self._repeat_toggle(key_id, action)
+            return
 
+        self._execute_with_delay(action)
+
+    def _execute_with_delay(self, action):
+        """Execute an action after its configured hold time."""
         try:
             delay_ms = max(0, int(action.get("delay_ms", 0) or 0))
         except (TypeError, ValueError):
             delay_ms = 0
-        if delay_ms:
-            self.root.after(delay_ms, lambda: self._execute_action(action))
-        else:
-            self._execute_action(action)
+        self._execute_action(action)
+
+    def _repeat_toggle(self, key_id, action):
+        """Execute a toggled action and schedule its next activation."""
+        if not self.toggle_states.get(key_id, False):
+            return
+        self._execute_with_delay(action)
+        try:
+            interval_ms = max(1, int(action.get("toggle_interval_ms", 1000) or 1000))
+        except (TypeError, ValueError):
+            interval_ms = 1000
+        self.toggle_jobs[key_id] = self.root.after(
+            interval_ms, lambda: self._repeat_toggle(key_id, action)
+        )
+
+    def _cancel_toggle(self, key_id):
+        """Cancel a pending repeated toggle activation."""
+        job = getattr(self, "toggle_jobs", {}).pop(key_id, None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except (AttributeError, tk.TclError):
+                pass
 
     def _execute_action(self, action):
         """Execute action"""
@@ -954,11 +1372,12 @@ class NumpadStreamDeckApp:
             elif action_type == "close_window":
                 self.root.destroy()
             elif action_type == "open_site":
-                webbrowser.open(value)
-            elif action_type == "open_program":
-                if value:
-                    subprocess.Popen(value)
-            elif action_type == "open_folder":
+                website = value.strip()
+                if website and not website.lower().startswith(("http://", "https://")):
+                    website = f"https://{website}"
+                if website:
+                    webbrowser.open(website)
+            elif action_type in {"open_program", "open_folder"}:
                 if value:
                     os.startfile(value)
             elif action_type == "hotkey":
@@ -976,16 +1395,11 @@ class NumpadStreamDeckApp:
                 keyboard.send("volume_down")
             elif action_type == "mute":
                 keyboard.send("volume_mute")
-            elif action_type == "windows_tab":
-                keyboard.send("win+tab")
-            elif action_type == "alt_tab":
-                keyboard.send("alt+tab")
             elif action_type == "write_text":
                 if value:
                     keyboard.write(value)
-                    keyboard.press_and_release("enter")
-            elif action_type == "lock_pc":
-                ctypes.windll.user32.LockWorkStation()
+                    if action.get("send_when_executed", True):
+                        keyboard.press_and_release("enter")
             elif action_type == "screenshot":
                 from PIL import ImageGrab
                 screenshot = ImageGrab.grab()
@@ -1083,7 +1497,11 @@ class NumpadStreamDeckApp:
 
     def _create_tray(self):
         """Create tray icon"""
-        image = Image.new("RGBA", (64, 64), (30, 30, 40, 255))
+        icon_path = resource_path("icon.ico")
+        try:
+            image = Image.open(icon_path).convert("RGBA")
+        except (OSError, ValueError):
+            image = Image.new("RGBA", (64, 64), (30, 30, 40, 255))
         self.tray = pystray.Icon(APP_NAME, image, APP_NAME, menu=pystray.Menu(
             pystray.MenuItem("Open", lambda: self.root.deiconify()),
             pystray.MenuItem("Exit", self._exit_app),
@@ -1099,18 +1517,17 @@ class NumpadStreamDeckApp:
     def _stop_assign(self):
         """Stop key assignment"""
         self._assigning = False
+        self._assignment_generation = getattr(self, "_assignment_generation", 0) + 1
+        self._assignment_key_var = None
+        self._assignment_key_label = None
         if self.recording_callback:
             keyboard.unhook(self.recording_callback)
             self.recording_callback = None
 
     def _normalize_key(self, name):
         """Normalize key name"""
-        aliases = {
-            "kp0": "0", "kp1": "1", "kp2": "2", "kp3": "3", "kp4": "4",
-            "kp5": "5", "kp6": "6", "kp7": "7", "kp8": "8", "kp9": "9",
-        }
         normalized = (name or "").lower().strip()
-        return aliases.get(normalized, normalized)
+        return normalized
 
     def _normalize_shortcut_key(self, name):
         """Normalize names emitted while recording a shortcut."""
@@ -1152,15 +1569,25 @@ class NumpadStreamDeckApp:
         key_number = event.get("vk") or key
         return f"{device_name} : key {key_number} : {key}"
 
-    def _capture_native_key(self, event):
+    def _capture_native_key(self, event, generation=None):
         """Show the complete physical device and key during assignment."""
-        if not getattr(self, "_assigning", False):
+        if not getattr(self, "_assigning", False) or (
+            generation is not None and generation != self._assignment_generation
+        ):
+            return
+        key_var = self._assignment_key_var
+        key_label = self._assignment_key_label
+        if key_var is None or key_label is None:
             return
         key_id = self._event_key_id(event)
-        self._assignment_key_var.set(key_id)
-        self._assignment_key_label.config(
-            text=f"Detected: {self._display_event_key(event)}", foreground="#00aa00"
-        )
+        try:
+            key_var.set(key_id)
+            key_label.config(
+                text=f"Detected: {self._display_event_key(event)}", foreground="#00aa00"
+            )
+        except tk.TclError:
+            self._stop_assign()
+            return
         self._stop_assign()
 
     def _get_action_label(self, action_type):

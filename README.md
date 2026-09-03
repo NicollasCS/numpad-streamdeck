@@ -21,7 +21,7 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 
 - Close Window
 - Open Website
-- Launch Application
+- Open File or Application
 - Open Folder
 - Keyboard Shortcut
 - Play/Pause
@@ -30,10 +30,7 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 - Volume Up
 - Volume Down
 - Mute
-- Windows+Tab
-- Alt+Tab
-- Type Text+Enter
-- Lock PC
+- Type Text
 - Screenshot
 
 ## Requirements

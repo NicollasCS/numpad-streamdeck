@@ -2,23 +2,29 @@
 setlocal
 cd /d "%~dp0"
 
+set "PYTHON=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON=.venv\Scripts\python.exe"
+
 echo [1/4] Instalando dependencias...
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+%PYTHON% -m pip install --upgrade pip
+if errorlevel 1 exit /b 1
+%PYTHON% -m pip install -r requirements.txt
+if errorlevel 1 exit /b 1
 
 echo [2/4] Compilando helper nativo...
-if not exist cpp\raw_input_filter.exe (
-    if "%VSCMD_VER%"=="" (
-        echo ERRO: Visual Studio Developer Command Prompt nao detectado.
-        echo Instale o Visual Studio 2022 com "Desktop development with C++" e rode este script em um terminal de desenvolvimento.
-        exit /b 1
-    )
+if "%VSCMD_VER%"=="" if not exist cpp\raw_input_filter.exe (
+    echo ERRO: Visual Studio Developer Command Prompt nao detectado.
+    echo Instale o Visual Studio 2022 com "Desktop development with C++" e rode este script em um terminal de desenvolvimento.
+    exit /b 1
+)
+if not "%VSCMD_VER%"=="" (
     cl /EHsc /std:c++17 cpp\raw_input_filter.cpp /link user32.lib /OUT:cpp\raw_input_filter.exe
     if errorlevel 1 exit /b 1
 )
 
 echo [3/4] Gerando executavel PyInstaller...
-pyinstaller --noconfirm --onefile --windowed --name NumpadStreamDeck numpad_streamdeck.py
+%PYTHON% -m PyInstaller --noconfirm NumpadStreamDeck.spec
+if errorlevel 1 exit /b 1
 
 if exist cpp\raw_input_filter.exe copy /Y cpp\raw_input_filter.exe dist\raw_input_filter.exe >nul
 
@@ -36,16 +42,19 @@ if not exist VC_redist.x64.exe (
     )
 )
 
+set "ISCC=iscc"
 where iscc >nul 2>nul
-if %ERRORLEVEL% NEQ 0 (
+if errorlevel 1 if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if "%ISCC%"=="iscc" if not exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     echo [4/4] Inno Setup nao encontrado. O instalador .exe nao foi gerado.
     echo Instale o Inno Setup e rode este script novamente.
     echo Download: https://jrsoftware.org/isinfo.php
-    exit /b 0
+    exit /b 1
 )
 
 echo [4/4] Compilando instalador com Inno Setup...
-iscc installer.iss
+"%ISCC%" installer.iss
+if errorlevel 1 exit /b 1
 
 if not exist installer\NumpadStreamDeck_Setup.exe (
     echo ERRO: Instalador nao foi gerado em installer\NumpadStreamDeck_Setup.exe
