@@ -1,0 +1,56 @@
+Vou te passar a forma correta de incluir o runtime do C++ no instalador para que o usuário final não precise instalar o Visual Studio.
+
+
+A solução correta é incluir o runtime do C++ no instalador, porque o usuário final não precisa do Visual Studio inteiro — só do redistribuível da Microsoft. Vou ajustar o build e o instalador para isso.
+
+
+
+✅ A resposta correta
+O usuário final não precisa instalar o Visual Studio completo.
+
+O que ele precisa é do runtime do Microsoft Visual C++ Redistributable. Isso é diferente de instalar o VS C++ inteiro.
+
+A diferença é esta:
+
+no PC que gera o setup: precisa ter o compilador C++ do Visual Studio
+no PC que usa o app: normalmente só precisa do runtime do VC++, e não do Visual Studio
+O que eu ajustei
+Eu já deixei o processo preparado para isso em:
+
+build_release.bat
+installer.iss
+A ideia é:
+
+compilar o helper nativo em C++
+baixar o VC++ Redistributable x64
+empacotar isso no instalador
+rodar o runtime durante a instalação
+Isso faz com que o usuário não precise instalar o VS C++ a parte.
+
+⚠️ Mas tem um detalhe importante
+A máquina que gera o setup ainda precisa do compilador C++ para criar o helper build_raw_input_helper.bat. Sem isso, o arquivo native helper não existirá e o app cai no modo “Native helper unavailable”, como no código em numpad_streamdeck.py:783-788.
+
+Eu validei isso aqui e a saída foi:
+
+comando de build tentou encontrar o compilador
+resultado: cl NAO ENCONTRADO
+status: exit code 1
+Ou seja, nesse ambiente atual o build final ainda não pode terminar porque o compilador da Microsoft não está instalado.
+
+✅ Resumo prático
+Para gerar o instalador final:
+
+precisa do Visual Studio Build Tools com C++
+Para o cliente usar:
+
+não precisa do VS
+precisa do runtime VC++ incluído no instalador
+O setup não “instala o VS” sozinho
+
+ele instala apenas o runtime necessário
+mas o build do helper precisa do compilador em uma máquina de desenvolvimento
+Se você quiser, no próximo passo eu posso te mandar o passo exato para:
+
+instalar o Visual Studio C++ no PC que vai gerar o setup
+gerar o installer final
+entregar um setup que funcione sem o cliente precisar mexer em nada.
