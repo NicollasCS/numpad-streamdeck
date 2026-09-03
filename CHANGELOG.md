@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-09-02
+
+### Added
+- Independent `Quick press`, `Hold`, and `Double click` actions for the same key
+- Unique action IDs so gesture functions do not overwrite one another
+- Hold timing that activates once and requires releasing the key before another activation
+- Optional Enter key when using `Type Text`
+- Version and repository information in Settings
+- 32-bit Windows compatibility warning during setup
+- Application icon for the executable, shortcuts, tray, and installer
+
+### Changed
+- `Open File or Application` opens files with their Windows default application
+- `Open Folder` uses a folder picker
+- Quick press waits briefly to distinguish it from double click
+- Installer includes the native keyboard helper and Microsoft Visual C++ Redistributable
+- Build script uses the project virtual environment and the PyInstaller spec file
+
+### Fixed
+- Prevented the trigger key from being inserted before typed text
+- Fixed stale Tkinter callbacks after closing key assignment dialogs
+- Fixed website values without a protocol opening File Explorer
+- Fixed the native helper to report key release events
+- Fixed installer architecture detection on 64-bit Windows
+
 ## [1.0.0] - 2026-09-01
 
 ### Added

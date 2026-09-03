@@ -10,7 +10,7 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 - Presets with create, switch, and delete operations
 - Actions for websites, applications, folders, media, screenshots, lock, text, and shortcuts
 - Shortcut recording for combinations such as `Alt+Left`
-- Optional toggle, double-click, and activation delay for every key
+- Quick press, hold, and double-click actions for the same key
 - System tray support
 - Optional startup with Windows
 - Optional minimize-to-tray behavior
@@ -21,7 +21,7 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 
 - Close Window
 - Open Website
-- Launch Application
+- Open File or Application
 - Open Folder
 - Keyboard Shortcut
 - Play/Pause
@@ -30,10 +30,7 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 - Volume Up
 - Volume Down
 - Mute
-- Windows+Tab
-- Alt+Tab
-- Type Text+Enter
-- Lock PC
+- Type Text
 - Screenshot
 
 ## Requirements
@@ -83,7 +80,9 @@ The helper consumes legacy input for the selected Stream Deck keyboard so config
 3. Click **Assign key**, then press the desired key.
 4. Choose an action and fill in its value.
 5. For **Keyboard Shortcut**, use **Record shortcut** or enter a combination such as `Alt+Left`.
-6. Optionally set a key name, toggle mode, double-click mode, or delay in milliseconds.
+6. Select a gesture: **Quick press**, **Hold**, or **Double click**.
+7. For **Hold**, set the required hold time in milliseconds.
+8. Click **Save**.
 7. Click **Save**.
 
 Existing assignments can be edited, renamed, or moved to another physical key with **Change key**.
@@ -104,7 +103,7 @@ dist\raw_input_filter.exe
 installer\NumpadStreamDeck_Setup.exe
 ```
 
-The installer build requires Inno Setup to be installed and available as `iscc` in `PATH`.
+The installer build requires Inno Setup to be installed. The release script also detects the default Inno Setup installation path automatically.
 
 ## Tests
 
