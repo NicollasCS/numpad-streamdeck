@@ -1,0 +1,60 @@
+QMainWindow, QWidget {
+    background: #14161a;
+    color: #e6e9ef;
+}
+
+QTabWidget::pane {
+    border: 0;
+    background: #14161a;
+}
+
+QTabBar::tab {
+    background: #252a33;
+    color: #e6e9ef;
+    min-width: 240px;
+    padding: 12px 28px;
+    margin: 4px;
+    border-radius: 6px;
+    font-size: 16px;
+}
+
+QTabBar::tab:selected {
+    background: #303744;
+}
+
+QListWidget, QLineEdit {
+    background: #1d2026;
+    border: 1px solid #343944;
+    border-radius: 6px;
+    padding: 6px;
+}
+
+QPushButton {
+    background: #252a33;
+    border: 1px solid #3a414d;
+    border-radius: 6px;
+    padding: 10px;
+}
+
+QPushButton:hover {
+    background: #303846;
+}
+
+QPushButton:pressed {
+    background: #46536a;
+}
+
+QListWidget {
+    min-width: 230px;
+}
+
+#functionCard {
+    background: #252a33;
+    border: 1px solid #303744;
+    border-radius: 8px;
+}
+
+#functionCard QLabel {
+    background: transparent;
+    font-size: 18px;
+}

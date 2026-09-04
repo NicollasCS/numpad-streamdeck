@@ -1,5 +1,15 @@
 # Numpad Stream Deck
 
+## v3.0.0-alpha.1
+
+The Qt 6 rewrite is available under `src/numpad_streamdeck`. It is an
+incremental Windows desktop implementation using C++20, Qt 6, CMake and
+native Windows Raw Input. The original Python application remains available
+as the legacy implementation during migration.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module boundaries and
+migration notes.
+
 A Windows desktop app that turns one or more physical keyboards into configurable shortcut pads. Select a keyboard, assign keys to actions, and keep different workflows in separate presets.
 
 ## Features
@@ -36,9 +46,27 @@ A Windows desktop app that turns one or more physical keyboards into configurabl
 ## Requirements
 
 - Windows 10 or later
+- Visual Studio 2022 with Desktop development with C++
+- Qt 6 for MSVC 2022 64-bit
+- CMake 3.20 or newer
 - Python 3.10 or later for running from source
-- Visual Studio C++ build tools for compiling the Raw Input helper
 - Inno Setup 6 only when building the installer
+
+## Build the Qt application
+
+Open **Developer Command Prompt for VS 2022**, then run one command at a time:
+
+```bat
+cd /d C:\Users\nicol\Documents\fodase
+set CMAKE_PREFIX_PATH=C:\Qt\6.11.2\msvc2022_64
+cmake --preset debug
+cmake --build --preset debug-build
+ctest --preset debug-test
+build-v2\debug\Debug\NumpadStreamDeck.exe
+```
+
+The exact Qt path may differ on your machine. `windeployqt` copies the Qt
+runtime beside the executable during the build.
 
 ## Run From Source
 
@@ -87,7 +115,7 @@ The helper consumes legacy input for the selected Stream Deck keyboard so config
 
 Existing assignments can be edited, renamed, or moved to another physical key with **Change key**.
 
-## Build
+## Legacy build
 
 The release script installs Python dependencies, builds the executable, copies the Raw Input helper, and optionally creates the Inno Setup installer:
 
@@ -95,7 +123,7 @@ The release script installs Python dependencies, builds the executable, copies t
 build_release.bat
 ```
 
-Outputs:
+Legacy outputs:
 
 ```text
 dist\NumpadStreamDeck.exe
@@ -125,6 +153,10 @@ installer.iss                Inno Setup configuration
 requirements.txt             Python dependencies
 icon.ico                     Application icon
 ```
+
+The v3 implementation is organized under `src/numpad_streamdeck` into core,
+profiles, actions, storage, input and UI modules. The v2 CMake targets are
+`NumpadStreamDeck` and `numpad_streamdeck_core_tests`.
 
 ## License
 
